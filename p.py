@@ -15,9 +15,8 @@ import subprocess
 import ssl
 import sys
 import requests
-from shodan import Shodan
 from urllib.parse import urlencode
-from datetime import datetime
+from shodan import Shodan
 
 # Setup logging
 logging.basicConfig(
@@ -45,8 +44,7 @@ CDN_HEADER_SIGNATURES = {
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Mobile/15E148 Safari/604.1"
+    "Mozilla/5.0 (X11; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0"
 ]
 
 RANDOM_SUBDOMAINS = [''.join(random.choices(string.ascii_lowercase + string.digits, k=15)) for _ in range(5)]
@@ -78,22 +76,8 @@ def is_cdn_ip(ip: str, asn_info: Dict) -> Tuple[bool, str]:
     except ValueError:
         return False, ""
 
-def run_amass(domain: str, wordlist_path: str) -> List[str]:
-    """Jalankan Amass untuk enumerasi subdomain aktif/pasif"""
-    try:
-        output_file = f"amass_{domain}.txt"
-        cmd = [
-            "amass", "enum", "-d", domain, "-brute", "-w", wordlist_path,
-            "-o", output_file, "-passive", "-timeout", "30"
-        ]
-        subprocess.run(cmd, check=True, timeout=1800)
-        with open(output_file, "r") as f:
-            return [line.strip() for line in f if line.strip()]
-    except Exception as e:
-        logging.error(f"Amass failed: {e}")
-        return []
-
 def run_massdns(domain: str, wordlist_path: str, resolver_path: str = "resolvers.txt") -> List[Dict]:
+    """Jalankan massdns untuk brute-force subdomain"""
     try:
         output_file = f"massdns_{domain}.txt"
         cmd = [
@@ -113,6 +97,7 @@ def run_massdns(domain: str, wordlist_path: str, resolver_path: str = "resolvers
         return []
 
 def run_dnsx(domain: str, input_file: str) -> List[str]:
+    """Filter wildcard dengan dnsx"""
     try:
         output_file = f"dnsx_{domain}.txt"
         cmd = ["dnsx", "-wd", domain, "-l", input_file, "-o", output_file]
@@ -124,6 +109,7 @@ def run_dnsx(domain: str, input_file: str) -> List[str]:
         return []
 
 def run_httpx(subdomains: List[str], ports: List[int]) -> List[Dict]:
+    """Cek HTTP/HTTPS dengan httpx"""
     try:
         input_file = f"httpx_input_{random.randint(1000, 9999)}.txt"
         with open(input_file, "w") as f:
@@ -151,6 +137,7 @@ def run_httpx(subdomains: List[str], ports: List[int]) -> List[Dict]:
         return []
 
 def run_shodan_search(domain: str, api_key: str) -> List[Dict]:
+    """Cari subdomain/IP via Shodan"""
     try:
         shodan = Shodan(api_key)
         results = shodan.search(f"hostname:{domain}", limit=100)
@@ -170,30 +157,16 @@ def run_shodan_search(domain: str, api_key: str) -> List[Dict]:
         logging.error(f"Shodan search failed: {e}")
         return []
 
-def get_random_headers() -> Dict:
-    """Generate random headers dengan advanced manipulation"""
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": random.choice([
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "application/json, text/plain, */*"
-        ]),
-        "Accept-Language": random.choice(["en-US,en;q=0.5", "id-ID,id;q=0.9,en;q=0.8"]),
-        "Connection": "keep-alive",
-        "X-Forwarded-For": f"{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 255)}"
-    }
-    # Tambah header acak buat WAF evasion
-    if random.random() > 0.3:
-        headers["Referer"] = f"https://{''.join(random.choices(string.ascii_lowercase, k=10))}.com"
-    if random.random() > 0.4:
-        headers["Cookie"] = f"session={''.join(random.choices(string.ascii_letters + string.digits, k=20))}"
-    return headers
-
-async def http_fingerprint(ip: str, port: int, session: aiohttp.ClientSession, use_tls_fingerprint: bool = False, proxy: str = None, max_retries: int = 2) -> Dict:
+async def http_fingerprint(ip: str, port: int, session: aiohttp.ClientSession, use_tls_fingerprint: bool = False, proxy: str = None) -> Dict:
     url = f"http://{ip}:{port}" if port != 443 else f"https://{ip}"
     if random.random() > 0.5:
         url += "?" + urlencode({f"q{random.randint(1, 100)}": random.randint(1, 1000)})
     
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": random.choice(["text/html,application/xhtml+xml", "application/json"]),
+        "Accept-Language": random.choice(["en-US,en;q=0.5", "id-ID,id;q=0.9"])
+    }
     result = {
         "port": port,
         "status": None,
@@ -205,64 +178,54 @@ async def http_fingerprint(ip: str, port: int, session: aiohttp.ClientSession, u
         "cdn_detected": ""
     }
 
-    for attempt in range(max_retries):
-        try:
-            await asyncio.sleep(random.uniform(0.2, 0.7))  # Throttling lebih acak
-            headers = get_random_headers()
-            if use_tls_fingerprint and port == 443:
-                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-                context.set_alpn_protocols(["h2", "http/1.1"])
-                context.set_ciphers("ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256")
-                async with session.get(url, headers=headers, ssl=context, proxy=proxy, timeout=8) as resp:
-                    result["status"] = resp.status
-                    result["headers"] = dict(resp.headers)
-                    result["final_url"] = str(resp.url)
-                    result["http2"] = resp.version == (2, 0)
-                    result["tls_fingerprint"] = compute_ja3_fingerprint(context)
-                    if resp.status in [403, 429]:
-                        logging.warning(f"WAF block detected on {ip}:{port} (Status: {resp.status}, Attempt: {attempt+1})")
-                        continue
-                    try:
-                        text = await resp.text()
-                        start = text.lower().find("<title>")
-                        end = text.lower().find("</title>")
-                        if start != -1 and end != -1:
-                            result["title"] = text[start + 7:end].strip()
-                    except:
-                        pass
-                    for cdn, signatures in CDN_HEADER_SIGNATURES.items():
-                        if any(sig in result["headers"] for sig in signatures):
-                            result["cdn_detected"] = cdn
-                            break
-                    break
-            else:
-                async with session.get(url, headers=headers, proxy=proxy, timeout=8, allow_redirects=True) as resp:
-                    result["status"] = resp.status
-                    result["headers"] = dict(resp.headers)
-                    result["final_url"] = str(resp.url)
-                    result["http2"] = resp.version == (2, 0)
-                    if resp.status in [403, 429]:
-                        logging.warning(f"WAF block detected on {ip}:{port} (Status: {resp.status}, Attempt: {attempt+1})")
-                        continue
-                    try:
-                        text = await resp.text()
-                        start = text.lower().find("<title>")
-                        end = text.lower().find("</title>")
-                        if start != -1 and end != -1:
-                            result["title"] = text[start + 7:end].strip()
-                    except:
-                        pass
-                    for cdn, signatures in CDN_HEADER_SIGNATURES.items():
-                        if any(sig in result["headers"] for sig in signatures):
-                            result["cdn_detected"] = cdn
-                            break
-                    break
-        except aiohttp.ClientError as e:
-            logging.debug(f"HTTP retry failed for {ip}:{port}: {e}")
-            if attempt == max_retries - 1:
-                result["status"] = "ERROR"
-        except Exception as e:
-            logging.debug(f"HTTP check failed for {ip}:{port}: {e}")
+    try:
+        await asyncio.sleep(random.uniform(0.1, 0.5))
+        if use_tls_fingerprint and port == 443:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.set_alpn_protocols(["h2", "http/1.1"])
+            context.set_ciphers("ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256")
+            async with session.get(url, headers=headers, ssl=context, proxy=proxy, timeout=8) as resp:
+                result["status"] = resp.status
+                result["headers"] = dict(resp.headers)
+                result["final_url"] = str(resp.url)
+                result["http2"] = resp.version == (2, 0)
+                result["tls_fingerprint"] = compute_ja3_fingerprint(context)
+                if resp.status in [403, 429]:
+                    logging.warning(f"WAF block detected on {ip}:{port} (Status: {resp.status})")
+                try:
+                    text = await resp.text()
+                    start = text.lower().find("<title>")
+                    end = text.lower().find("</title>")
+                    if start != -1 and end != -1:
+                        result["title"] = text[start + 7:end].strip()
+                except:
+                    pass
+                for cdn, signatures in CDN_HEADER_SIGNATURES.items():
+                    if any(sig in result["headers"] for sig in signatures):
+                        result["cdn_detected"] = cdn
+                        break
+        else:
+            async with session.get(url, headers=headers, proxy=proxy, timeout=8, allow_redirects=True) as resp:
+                result["status"] = resp.status
+                result["headers"] = dict(resp.headers)
+                result["final_url"] = str(resp.url)
+                result["http2"] = resp.version == (2, 0)
+                if resp.status in [403, 429]:
+                    logging.warning(f"WAF block detected on {ip}:{port} (Status: {resp.status})")
+                try:
+                    text = await resp.text()
+                    start = text.lower().find("<title>")
+                    end = text.lower().find("</title>")
+                    if start != -1 and end != -1:
+                        result["title"] = text[start + 7:end].strip()
+                except:
+                    pass
+                for cdn, signatures in CDN_HEADER_SIGNATURES.items():
+                    if any(sig in result["headers"] for sig in signatures):
+                        result["cdn_detected"] = cdn
+                        break
+    except Exception as e:
+        logging.debug(f"HTTP check failed for {ip}:{port}: {e}")
     return result
 
 def compute_ja3_fingerprint(context: ssl.SSLContext) -> str:
@@ -274,39 +237,34 @@ def compute_ja3_fingerprint(context: ssl.SSLContext) -> str:
         logging.error(f"JA3 computation failed: {e}")
         return "ja3:unknown"
 
-def load_proxies(proxy_file: str) -> List[str]:
-    if not Path(proxy_file).is_file():
-        logging.warning(f"Proxy file '{proxy_file}' tidak ditemukan")
-        return []
-    with open(proxy_file, "r") as f:
-        return [line.strip() for line in f if line.strip()]
+def save_results(results: List[Dict], json_file: str, csv_file: str):
+    with open(json_file, "w") as f:
+        json.dump(results, f, indent=2)
+    with open(csv_file, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "subdomain", "ip", "asn", "org", "cdn_name", "port", "status",
+            "server", "title", "final_url", "http2", "tls_fingerprint", "cdn_detected", "nuclei_findings"
+        ])
+        writer.writeheader()
+        for result in results:
+            writer.writerow({
+                "subdomain": result["subdomain"],
+                "ip": result["ip"],
+                "asn": result["asn"]["asn"],
+                "org": result["asn"]["org"],
+                "cdn_name": result["cdn"]["name"],
+                "port": result.get("http", {}).get("port", "-"),
+                "status": result.get("http", {}).get("status", "-"),
+                "server": result.get("http", {}).get("headers", {}).get("Server", "-"),
+                "title": result.get("http", {}).get("title", "-"),
+                "final_url": result.get("http", {}).get("final_url", "-"),
+                "http2": str(result.get("http", {}).get("http2", False)),
+                "tls_fingerprint": result.get("http", {}).get("tls_fingerprint", "-"),
+                "cdn_detected": result.get("http", {}).get("cdn_detected", "-"),
+                "nuclei_findings": json.dumps(result.get("nuclei_findings", []))
+            })
 
-def setup_tor_proxy() -> str:
-    """Setup Tor proxy (butuh Tor service jalan)"""
-    try:
-        subprocess.run(["tor"], capture_output=True, timeout=5)
-        return "socks5://127.0.0.1:9050"
-    except Exception as e:
-        logging.warning(f"Tor setup failed: {e}")
-        return None
-
-def parse_ports(port_str: str) -> List[int]:
-    ports = []
-    for part in port_str.split(','):
-        if '-' in part:
-            try:
-                start, end = map(int, part.split('-'))
-                ports.extend(range(start, end + 1))
-            except ValueError:
-                continue
-        else:
-            try:
-                ports.append(int(part))
-            except ValueError:
-                continue
-    return sorted(list(set(ports)))
-
-async def main(domain: str, wordlist_path: str, ports: str, use_tls_fingerprint: bool, use_nuclei: bool, proxy_file: str = None, shodan_api: str = None, use_tor: bool = False):
+async def main(domain: str, wordlist_path: str, ports: str, use_tls_fingerprint: bool, use_nuclei: bool, securitytrails_api: str = None, proxy_file: str = None, shodan_api: str = None):
     print("⚠️ PERINGATAN: Gunakan skrip ini hanya pada domain yang Anda miliki atau dengan izin eksplisit!")
     logging.info(f"Starting scan for domain: {domain}")
 
@@ -323,41 +281,33 @@ async def main(domain: str, wordlist_path: str, ports: str, use_tls_fingerprint:
         print("Error: Port tidak valid")
         return
 
-    # Load proxies atau setup Tor
+    # Load proxies
     proxies = load_proxies(proxy_file) if proxy_file else []
-    if use_tor:
-        tor_proxy = setup_tor_proxy()
-        if tor_proxy:
-            proxies.append(tor_proxy)
     if proxies:
         logging.info(f"Loaded {len(proxies)} proxies")
 
-    # Step 1: Enumerasi subdomain dengan Amass
-    amass_subdomains = run_amass(domain, wordlist_path)
-    logging.info(f"Amass found {len(amass_subdomains)} subdomains")
-
-    # Step 2: Brute-force dengan massdns
+    # Step 1: Brute-force dengan massdns
     massdns_results = run_massdns(domain, wordlist_path)
     logging.info(f"MassDNS found {len(massdns_results)} subdomains")
 
-    # Step 3: Filter wildcard dengan dnsx
+    # Step 2: Filter wildcard dengan dnsx
     massdns_input = f"massdns_input_{domain}.txt"
     with open(massdns_input, "w") as f:
-        f.write("\n".join([r["subdomain"] for r in massdns_results] + amass_subdomains))
+        f.write("\n".join([r["subdomain"] for r in massdns_results]))
     valid_subdomains = run_dnsx(domain, massdns_input)
     logging.info(f"dnsx filtered {len(valid_subdomains)} valid subdomains")
 
-    # Step 4: Augment dengan Shodan
+    # Step 3: Augment dengan Shodan
     shodan_subdomains = run_shodan_search(domain, shodan_api) if shodan_api else []
     subdomains = valid_subdomains + [s["subdomain"] for s in shodan_subdomains]
     subdomains = list(set(subdomains))  # Deduplikasi
     logging.info(f"Total subdomains after Shodan: {len(subdomains)}")
 
-    # Step 5: Cek HTTP/HTTPS dengan httpx
+    # Step 4: Cek HTTP/HTTPS dengan httpx
     httpx_results = run_httpx(subdomains, target_ports)
     logging.info(f"httpx found {len(httpx_results)} live subdomains")
 
-    # Step 6: HTTP fingerprinting tambahan
+    # Step 5: HTTP fingerprinting tambahan
     all_results = []
     async with aiohttp.ClientSession() as session:
         for httpx_result in httpx_results:
@@ -386,76 +336,20 @@ async def main(domain: str, wordlist_path: str, ports: str, use_tls_fingerprint:
     print(f"Results saved to {json_file} and {csv_file}")
     logging.info(f"Results saved to {json_file} and {csv_file}")
 
-def run_nuclei(ip: str, port: int, output_file: str) -> List[Dict]:
-    try:
-        cmd = [
-            "nuclei", "-u", f"http://{ip}:{port}" if port != 443 else f"https://{ip}",
-            "-t", "cves/", "-t", "technologies/", "-jsonl", "-o", output_file
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        findings = []
-        with open(output_file, "r") as f:
-            for line in f:
-                findings.append(json.loads(line.strip()))
-        return findings
-    except Exception as e:
-        logging.error(f"Nuclei scan failed for {ip}:{port}: {e}")
-        return []
-
-def lookup_asn(ip: str) -> Dict:
-    if is_private_ip(ip):
-        logging.info(f"Skipping ASN lookup for private IP: {ip}")
-        return {"asn": "-", "org": "Private IP", "country": "-"}
-    
-    try:
-        from ipwhois import IPWhois
-        obj = IPWhois(ip)
-        results = obj.lookup_rdap()
-        return {
-            "asn": results.get("asn", "-"),
-            "org": results.get("network", {}).get("name", "-"),
-            "country": results.get("network", {}).get("country", "-")
-        }
-    except ImportError:
-        logging.warning("ipwhois not installed, falling back to whois CLI")
-    except Exception as e:
-        logging.error(f"RDAP lookup failed for {ip}: {e}")
-    
-    try:
-        result = subprocess.run(
-            ["whois", ip],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        output = result.stdout.lower()
-        asn = org = country = "-"
-        for line in output.splitlines():
-            if "aut-num:" in line or "origin:" in line:
-                asn = line.split(":")[1].strip()
-            elif "org-name:" in line or "organization:" in line:
-                org = line.split(":")[1].strip()
-            elif "country:" in line:
-                country = line.split(":")[1].strip()
-        return {"asn": asn, "org": org, "country": country}
-    except Exception as e:
-        logging.error(f"Whois CLI lookup failed for {ip}: {e}")
-        return {"asn": "-", "org": "-", "country": "-"}
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Supercharged Cloudflare Origin IP Bypass v4 - God-Tier Ninja Mode")
+    parser = argparse.ArgumentParser(description="Supercharged Cloudflare Origin IP Bypass v3 - Ninja Wildcard Buster")
     parser.add_argument("domain", help="Target domain (e.g., example.com)")
     parser.add_argument("wordlist", help="Path to subdomain wordlist file")
     parser.add_argument("--ports", help="Comma-separated ports or range (e.g., 80,443 or 1-1000)", default="80,443,8080")
     parser.add_argument("--tls-fingerprint", action="store_true", help="Enable TLS fingerprinting for WAF/CDN bypass")
     parser.add_argument("--nuclei", action="store_true", help="Enable Nuclei vulnerability scanning")
+    parser.add_argument("--securitytrails-api", help="SecurityTrails API key for passive DNS", default=None)
     parser.add_argument("--proxy-file", help="Path to proxy list file (one proxy per line)", default=None)
     parser.add_argument("--shodan-api", help="Shodan API key for passive enumeration", default=None)
-    parser.add_argument("--use-tor", action="store_true", help="Use Tor for proxy rotation")
     args = parser.parse_args()
 
     try:
-        asyncio.run(main(args.domain, args.wordlist, args.ports, args.tls_fingerprint, args.nuclei, args.proxy_file, args.shodan_api, args.use_tor))
+        asyncio.run(main(args.domain, args.wordlist, args.ports, args.tls_fingerprint, args.nuclei, args.securitytrails_api, args.proxy_file, args.shodan_api))
     except KeyboardInterrupt:
         print("\nScan dihentikan oleh pengguna")
         logging.info("Scan interrupted by user")
