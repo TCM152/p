@@ -318,6 +318,33 @@ class HTTPScanner:
             tech.append("Drupal")
         return tech
 
+    def run_httpx(self, subdomains: List[str], ports: List[int]) -> List[Dict]:
+        try:
+            input_file = f"httpx_input_{random.randint(1000, 9999)}.txt"
+            with open(input_file, "w") as f:
+                f.write("\n".join(subdomains))
+            output_file = f"httpx_{random.randint(1000, 9999)}.json"
+            cmd = [
+                "httpx", "-l", input_file, "-ports", ",".join(map(str, ports)),
+                "-status-code", "-title", "-json", "-o", output_file
+            ]
+            subprocess.run(cmd, check=True, timeout=600)
+            results = []
+            with open(output_file, "r") as f:
+                for line in f:
+                    if line.strip():
+                        data = json.loads(line.strip())
+                        results.append({
+                            "url": data.get("url"),
+                            "status": data.get("status_code"),
+                            "title": data.get("title", "-"),
+                            "port": int(data.get("port", 80))
+                        })
+            return results
+        except Exception as e:
+            logging.error(f"httpx failed: {e}")
+            return []
+
 class ResultProcessor:
     def __init__(self, domain: str):
         self.domain = domain
@@ -352,7 +379,8 @@ class ResultProcessor:
             for result in filtered_results:
                 writer.writerow({
                     "subdomain": result.subdomain,
-                    "ip": result.asn["asn"],
+                    "ip": result.ip,  # Fixed: Use result.ip instead of result.asn["asn"]
+                    "asn": result.asn["asn"],
                     "org": result.asn["org"],
                     "cdn_name": result.cdn["name"],
                     "port": result.http.get("port", "-"),
@@ -448,7 +476,7 @@ class Scanner:
         subdomains = list(set(valid_subdomains + [s["subdomain"] for s in shodan_subdomains]))
         logging.info(f"Total subdomains: {len(subdomains)}")
 
-        httpx_results = self.dns_scanner.run_httpx(subdomains, self.ports)
+        httpx_results = self.http_scanner.run_httpx(subdomains, self.ports)  # Fixed: Call run_httpx from http_scanner
         logging.info(f"httpx found {len(httpx_results)} live subdomains")
 
         async with aiohttp.ClientSession() as session:
