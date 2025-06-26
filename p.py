@@ -326,7 +326,8 @@ class HTTPScanner:
             output_file = f"httpx_{random.randint(1000, 9999)}.json"
             cmd = [
                 "httpx", "-l", input_file, "-ports", ",".join(map(str, ports)),
-                "-status-code", "-title", "-json", "-o", output_file
+                "-status-code", "-title", "-json", "-o", output_file,
+                "-threads", "50", "-silent"  # Optimasi untuk Colab
             ]
             subprocess.run(cmd, check=True, timeout=600)
             results = []
@@ -379,7 +380,7 @@ class ResultProcessor:
             for result in filtered_results:
                 writer.writerow({
                     "subdomain": result.subdomain,
-                    "ip": result.ip,  # Fixed: Use result.ip instead of result.asn["asn"]
+                    "ip": result.ip,
                     "asn": result.asn["asn"],
                     "org": result.asn["org"],
                     "cdn_name": result.cdn["name"],
@@ -463,6 +464,9 @@ class Scanner:
 
     async def run(self, use_tls_fingerprint: bool, use_nuclei: bool):
         print("⚠️ PERINGATAN: Gunakan skrip ini hanya pada domain yang Anda miliki atau dengan izin eksplisit!")
+        logging.info(f"Starting scan for {self.domain} at {datetime.now().strftime('%H:%M:%S %Z')}")
+
+        # Step 1: Enumerasi subdomain
         amass_subdomains = self.dns_scanner.run_amass(self.wordlist_path)
         logging.info(f"Amass found {len(amass_subdomains)} subdomains")
 
@@ -476,9 +480,11 @@ class Scanner:
         subdomains = list(set(valid_subdomains + [s["subdomain"] for s in shodan_subdomains]))
         logging.info(f"Total subdomains: {len(subdomains)}")
 
-        httpx_results = self.http_scanner.run_httpx(subdomains, self.ports)  # Fixed: Call run_httpx from http_scanner
+        # Step 2: HTTP probing
+        httpx_results = self.http_scanner.run_httpx(subdomains, self.ports)
         logging.info(f"httpx found {len(httpx_results)} live subdomains")
 
+        # Step 3: Fingerprinting dan analisis
         async with aiohttp.ClientSession() as session:
             for httpx_result in httpx_results:
                 ip = next((r["ip"] for r in massdns_results if r["subdomain"] in httpx_result["url"]), None)
@@ -500,23 +506,27 @@ class Scanner:
                 )
                 self.result_processor.add_result(result)
 
+        # Step 4: Simpan hasil
         json_file = f"results_{self.domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         csv_file = f"results_{self.domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         self.result_processor.save_results(json_file, csv_file)
         print(f"Results saved to {json_file} and {csv_file}")
+        logging.info(f"Scan completed at {datetime.now().strftime('%H:%M:%S %Z')}")
 
     def run_nuclei(self, ip: str, port: int) -> List[Dict]:
         try:
             output_file = f"nuclei_{ip}_{port}.jsonl"
             cmd = [
                 "nuclei", "-u", f"http://{ip}:{port}" if port != 443 else f"https://{ip}",
-                "-t", "cves/", "-t", "technologies/", "-jsonl", "-o", output_file
+                "-t", "cves/", "-t", "technologies/", "-jsonl", "-o", output_file,
+                "-silent", "-c", "10"  # Optimasi untuk Colab
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             findings = []
             with open(output_file, "r") as f:
                 for line in f:
-                    findings.append(json.loads(line.strip()))
+                    if line.strip():
+                        findings.append(json.loads(line.strip()))
             return findings
         except Exception as e:
             logging.error(f"Nuclei scan failed for {ip}:{port}: {e}")
@@ -539,7 +549,7 @@ def parse_ports(port_str: str) -> List[int]:
     return sorted(list(set(ports)))
 
 def main():
-    parser = argparse.ArgumentParser(description="Ultra-Modular Cloudflare Origin IP Bypass v5 - God-Tier")
+    parser = argparse.ArgumentParser(description="Ultra-Modular Cloudflare Origin IP Bypass v5.1 - God-Tier")
     parser.add_argument("domain", help="Target domain (e.g., example.com)")
     parser.add_argument("wordlist", help="Path to subdomain wordlist file")
     parser.add_argument("--ports", help="Comma-separated ports or range (e.g., 80,443 or 1-1000)", default="80,443,8080")
