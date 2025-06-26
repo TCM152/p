@@ -1,4 +1,3 @@
-# File: vio.py
 import asyncio
 import aiohttp
 import aiodns
@@ -52,6 +51,33 @@ USER_AGENTS = [
 
 RANDOM_SUBDOMAINS = [''.join(random.choices(string.ascii_lowercase + string.digits, k=15)) for _ in range(5)]
 
+def is_valid_domain(domain: str) -> bool:
+    import re
+    pattern = r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, domain))
+
+def is_private_ip(ip: str) -> bool:
+    try:
+        ip_addr = ipaddress.ip_address(ip)
+        return ip_addr.is_private
+    except ValueError:
+        return False
+
+def is_cdn_ip(ip: str, asn_info: Dict) -> Tuple[bool, str]:
+    try:
+        ip_addr = ipaddress.ip_address(ip)
+        for cdn, ranges in CDN_IP_RANGES.items():
+            for cidr in ranges:
+                if ip_addr in ipaddress.ip_network(cidr):
+                    return True, cdn
+        org = asn_info.get("org", "").upper()
+        for cdn, org_names in CDN_ORG_NAMES.items():
+            if any(name in org for name in org_names):
+                return True, cdn
+        return False, ""
+    except ValueError:
+        return False, ""
+
 @dataclass
 class ScanResult:
     subdomain: str
@@ -63,7 +89,6 @@ class ScanResult:
     nuclei_findings: List[Dict]
 
 class CacheManager:
-    """Kelola cache untuk DNS dan HTTP results"""
     def __init__(self, cache_file: str = "scan_cache.pkl"):
         self.cache_file = cache_file
         self.cache = self.load_cache()
@@ -93,7 +118,6 @@ class CacheManager:
         self.save_cache()
 
 class DNSScanner:
-    """Modul untuk DNS enumeration dan wildcard filtering"""
     def __init__(self, domain: str, resolver_path: str = "resolvers.txt"):
         self.domain = domain
         self.resolver_path = resolver_path
@@ -173,7 +197,6 @@ class DNSScanner:
             return results
 
 class HTTPScanner:
-    """Modul untuk HTTP fingerprinting dan WAF evasion"""
     def __init__(self):
         self.cache = CacheManager()
 
@@ -212,7 +235,7 @@ class HTTPScanner:
 
         for attempt in range(max_retries):
             try:
-                await asyncio.sleep(random.uniform(0.3, 1.0))  # Throttling adaptif
+                await asyncio.sleep(random.uniform(0.3, 1.0))
                 headers = self.get_random_headers()
                 if use_tls_fingerprint and port == 443:
                     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -283,7 +306,6 @@ class HTTPScanner:
             return "ja3:unknown"
 
     def detect_tech_stack(self, headers: Dict) -> List[str]:
-        """Deteksi tech stack dari headers"""
         tech = []
         server = headers.get("Server", "").lower()
         if "nginx" in server:
@@ -297,7 +319,6 @@ class HTTPScanner:
         return tech
 
 class ResultProcessor:
-    """Modul untuk memproses dan menyimpan hasil scan"""
     def __init__(self, domain: str):
         self.domain = domain
         self.results: List[ScanResult] = []
@@ -306,7 +327,6 @@ class ResultProcessor:
         self.results.append(result)
 
     def filter_results(self) -> List[ScanResult]:
-        """Filter hasil: hanya simpan subdomain live, non-CDN, dan status 200/301"""
         filtered = []
         seen_ips = set()
         for result in self.results:
@@ -332,8 +352,7 @@ class ResultProcessor:
             for result in filtered_results:
                 writer.writerow({
                     "subdomain": result.subdomain,
-                    "ip": result.ip,
-                    "asn": result.asn["asn"],
+                    "ip": result.asn["asn"],
                     "org": result.asn["org"],
                     "cdn_name": result.cdn["name"],
                     "port": result.http.get("port", "-"),
@@ -349,7 +368,6 @@ class ResultProcessor:
                 })
 
 class Scanner:
-    """Orchestrator utama untuk scanning"""
     def __init__(self, domain: str, wordlist_path: str, ports: List[int], proxy_file: str = None, shodan_api: str = None, use_tor: bool = False):
         self.domain = domain
         self.wordlist_path = wordlist_path
@@ -416,7 +434,7 @@ class Scanner:
             return {"asn": "-", "org": "-", "country": "-"}
 
     async def run(self, use_tls_fingerprint: bool, use_nuclei: bool):
-        # Step 1: Enumerasi subdomain
+        print("⚠️ PERINGATAN: Gunakan skrip ini hanya pada domain yang Anda miliki atau dengan izin eksplisit!")
         amass_subdomains = self.dns_scanner.run_amass(self.wordlist_path)
         logging.info(f"Amass found {len(amass_subdomains)} subdomains")
 
@@ -430,11 +448,9 @@ class Scanner:
         subdomains = list(set(valid_subdomains + [s["subdomain"] for s in shodan_subdomains]))
         logging.info(f"Total subdomains: {len(subdomains)}")
 
-        # Step 2: HTTP probing
         httpx_results = self.dns_scanner.run_httpx(subdomains, self.ports)
         logging.info(f"httpx found {len(httpx_results)} live subdomains")
 
-        # Step 3: Fingerprinting dan analisis
         async with aiohttp.ClientSession() as session:
             for httpx_result in httpx_results:
                 ip = next((r["ip"] for r in massdns_results if r["subdomain"] in httpx_result["url"]), None)
@@ -456,7 +472,6 @@ class Scanner:
                 )
                 self.result_processor.add_result(result)
 
-        # Step 4: Simpan hasil
         json_file = f"results_{self.domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         csv_file = f"results_{self.domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         self.result_processor.save_results(json_file, csv_file)
@@ -478,21 +493,6 @@ class Scanner:
         except Exception as e:
             logging.error(f"Nuclei scan failed for {ip}:{port}: {e}")
             return []
-
-def is_cdn_ip(ip: str, asn_info: Dict) -> Tuple[bool, str]:
-    try:
-        ip_addr = ipaddress.ip_address(ip)
-        for cdn, ranges in CDN_IP_RANGES.items():
-            for cidr in ranges:
-                if ip_addr in ipaddress.ip_network(cidr):
-                    return True, cdn
-        org = asn_info.get("org", "").upper()
-        for cdn, org_names in CDN_ORG_NAMES.items():
-            if any(name in org for name in org_names):
-                return True, cdn
-        return False, ""
-    except ValueError:
-        return False, ""
 
 def parse_ports(port_str: str) -> List[int]:
     ports = []
