@@ -20,6 +20,7 @@ from itertools import permutations
 import time
 from jinja2 import Environment, FileSystemLoader
 from collections import defaultdict
+from datetime import datetime  # Fix: Tambah import datetime
 
 # Setup logging
 logging.basicConfig(
@@ -86,7 +87,8 @@ async def detect_wildcard(domain: str, resolver: aiodns.DNSResolver) -> Tuple[bo
         try:
             result = await resolver.gethostbyname(f"{random_sub}.{domain}", socket.AF_INET)
             wildcard_ips.update(result.addresses)
-        except:
+        except Exception as e:
+            logging.debug(f"Wildcard detection failed for {random_sub}.{domain}: {e}")
             continue
     return bool(wildcard_ips), wildcard_ips
 
@@ -193,7 +195,6 @@ def get_random_headers() -> Dict:
     }
 
 def calculate_subdomain_score(result: Dict) -> int:
-    """Skor subdomain berdasarkan nilai: non-CDN, port terbuka, HTTP status"""
     score = 0
     if not result["cdn"]["is_cdn"]:
         score += 50
@@ -317,7 +318,6 @@ def load_proxies(proxy_file: str) -> List[str]:
         return [line.strip() for line in f if line.strip()]
 
 def generate_html_report(results: List[Dict], domain: str, output_file: str):
-    """Generate HTML dashboard pake Jinja2"""
     env = Environment(loader=FileSystemLoader('.'))
     template = env.from_string("""
     <!DOCTYPE html>
@@ -390,19 +390,16 @@ def generate_html_report(results: List[Dict], domain: str, output_file: str):
         f.write(rendered)
 
 def save_results(results: List[Dict], json_file: str, csv_file: str, html_file: str, domain: str):
-    # Tambah skor dan tech stack
     for result in results:
         result["score"] = calculate_subdomain_score(result)
         if result.get("nuclei_findings"):
             result["http"]["tech_stack"] = [f["info"]["name"] for f in result["nuclei_findings"] if f["template-id"] == "tech-detect"]
     
-    # Cluster IP berdasarkan ASN
     asn_clusters = defaultdict(list)
     for result in results:
         asn = result["asn"]["asn"]
         asn_clusters[asn].append(result["ip"])
     
-    # Tambah summary ke JSON
     summary = {
         "total_subdomains": len(results),
         "non_cdn_count": sum(1 for r in results if not r["cdn"]["is_cdn"]),
@@ -471,15 +468,18 @@ async def main(domain: str, wordlist_path: str, ports: str, use_tls_fingerprint:
 
     if not is_valid_domain(domain):
         print("Error: Domain tidak valid")
+        logging.error("Invalid domain provided")
         return
 
     if not Path(wordlist_path).is_file():
         print(f"Error: File wordlist '{wordlist_path}' tidak ditemukan")
+        logging.error(f"Wordlist file '{wordlist_path}' not found")
         return
 
     target_ports = parse_ports(ports)
     if not target_ports:
         print("Error: Port tidak valid")
+        logging.error("Invalid ports provided")
         return
 
     proxies = load_proxies(proxy_file) if proxy_file else []
@@ -579,3 +579,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nScan dihentikan oleh pengguna")
         logging.info("Scan interrupted by user")
+    except Exception as e:
+        print(f"Error: {e}")
+        logging.error(f"Main execution failed: {e}")
