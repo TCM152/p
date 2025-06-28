@@ -436,10 +436,14 @@ async def main(domain: str, wordlist_path: str, ports: str, use_tls_fingerprint:
         return
 
     # Interactive prompt untuk port kalau ga disediakan
-    if ports == "80,443,8080":
+    if ports == "80,443,8080":  # Default ports, minta input
         session = PromptSession("Masukkan port (comma-separated, e.g., 80,443,8080): ", completer=WordCompleter(['80', '443', '8080']))
-        ports_input = session.prompt()
-        target_ports = parse_ports(ports_input) if ports_input else target_ports
+        try:
+            ports_input = await session.prompt_async()  # Ganti ke prompt_async
+            target_ports = parse_ports(ports_input) if ports_input else target_ports
+        except Exception as e:
+            console.print(f"[red]Error getting port input: {e}. Using default ports {ports}[/red]")
+            logging.error(f"Prompt error: {e}")
 
     with open(wordlist_path, "r") as f:
         words = [line.strip() for line in f if line.strip()]
