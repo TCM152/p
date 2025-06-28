@@ -16,9 +16,9 @@ import ssl
 import sys
 import requests
 from datetime import datetime
-from scapy.all import *
-from scapy.layers.tls.all import *
-import hashlib
+from scapy.all import sniff, TCP, IP, Raw
+from scapy.layers.tls.all import TLS, TLSClientHello
+from hashlib import md5
 
 # Setup logging
 logging.basicConfig(
@@ -84,21 +84,19 @@ async def detect_wildcard(domain: str, resolver: aiodns.DNSResolver) -> Tuple[bo
 
 async def get_passive_subdomains(domain: str, api_key: str = None) -> List[str]:
     if not api_key:
-        print("[WARNING] No SecurityTrails API key provided, skipping passive DNS")
+        logging.info("No SecurityTrails API key provided, skipping passive DNS")
         return []
     try:
         headers = {"APIKEY": api_key}
         response = requests.get(f"https://api.securitytrails.com/v1/domain/{domain}/subdomains", headers=headers)
         if response.status_code == 200:
             data = response.json()
-            subdomains = [f"{sub}.{domain}" for sub in data.get("subdomains", [])]
-            print(f"[INFO] Added {len(subdomains)} passive subdomains from SecurityTrails")
-            return subdomains
+            return [f"{sub}.{domain}" for sub in data.get("subdomains", [])]
         else:
-            print(f"[ERROR] SecurityTrails API error: {response.status_code}")
+            logging.error(f"SecurityTrails API error: {response.status_code}")
             return []
     except Exception as e:
-        print(f"[ERROR] Passive DNS lookup failed: {e}")
+        logging.error(f"Passive DNS lookup failed: {e}")
         return []
 
 async def resolve_dns(subdomain: str, resolver: aiodns.DNSResolver, semaphore: asyncio.Semaphore, record_types: List[str] = ["A", "AAAA", "CNAME", "MX"]) -> Dict:
@@ -119,7 +117,7 @@ async def resolve_dns(subdomain: str, resolver: aiodns.DNSResolver, semaphore: a
 
 def lookup_asn(ip: str) -> Dict:
     if is_private_ip(ip):
-        print(f"[WARNING] Skipping ASN lookup for private IP: {ip}")
+        logging.info(f"Skipping ASN lookup for private IP: {ip}")
         return {"asn": "-", "org": "Private IP", "country": "-"}
     
     try:
@@ -132,9 +130,9 @@ def lookup_asn(ip: str) -> Dict:
             "country": results.get("network", {}).get("country", "-")
         }
     except ImportError:
-        print("[WARNING] ipwhois not installed, falling back to whois CLI")
+        logging.warning("ipwhois not installed, falling back to whois CLI")
     except Exception as e:
-        print(f"[ERROR] RDAP lookup failed for {ip}: {e}")
+        logging.error(f"RDAP lookup failed for {ip}: {e}")
     
     try:
         result = subprocess.run(
@@ -154,49 +152,44 @@ def lookup_asn(ip: str) -> Dict:
                 country = line.split(":")[1].strip()
         return {"asn": asn, "org": org, "country": country}
     except Exception as e:
-        print(f"[ERROR] Whois CLI lookup failed for {ip}: {e}")
+        logging.error(f"Whois CLI lookup failed for {ip}: {e}")
         return {"asn": "-", "org": "-", "country": "-"}
 
-def compute_ja3_fingerprint(host: str, port: int = 443) -> str:
-    """Compute JA3 fingerprint using Scapy"""
+def compute_ja3_fingerprint(ip: str, port: int = 443, timeout: int = 5) -> str:
+    """Compute JA3 fingerprint using Scapy by capturing TLS Client Hello"""
     try:
-        # Konfigurasi TLS ClientHello
-        conf.verb = 0  # Suppress Scapy output
-        sport = random.randint(1024, 65535)
-        packet = IP(dst=host) / TCP(sport=sport, dport=port, flags="S") / TLS(
-            type="client_hello",
-            version="TLS_1_2",
-            ciphers=[
-                TLS_RSA_WITH_AES_128_GCM_SHA256,
-                TLS_RSA_WITH_AES_256_GCM_SHA384,
-                TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
-            ],
-            exts=[
-                TLS_Ext_ServerName(servername=host),
-                TLS_Ext_SupportedGroups(groups=["secp256r1", "secp384r1"]),
-                TLS_Ext_SignatureAlgorithms(sig_algs=["rsa_pkcs1_sha256"]),
-                TLS_Ext_SupportedVersions(versions=["TLS_1_3", "TLS_1_2"])
-            ]
+        # Sniff TLS Client Hello packet
+        packets = sniff(
+            filter=f"tcp dst port {port} and host {ip}",
+            count=1,
+            timeout=timeout,
+            lfilter=lambda p: p.haslayer(TLS) and p[TLS].haslayer(TLSClientHello)
         )
-        
-        # Kirim packet dan ambil response
-        response = sr1(packet, timeout=2, verbose=0)
-        if not response or not response.haslayer(TLS):
-            return "ja3:unknown"
+        if not packets:
+            return "ja3:timeout"
 
-        # Ambil ClientHello fields
-        tls = packet[TLS]
-        version = str(tls.version)
-        ciphers = "-".join([str(c) for c in tls.ciphers]) if tls.ciphers else ""
-        extensions = "-".join([str(ext.type) for ext in tls.exts]) if tls.exts else ""
-        curves = "-".join([str(g) for g in tls.exts[1].groups]) if len(tls.exts) > 1 else ""
+        client_hello = packets[0][TLS][TLSClientHello]
         
-        # Gabungin jadi JA3 string
-        ja3_string = f"{version},{ciphers},{extensions},{curves},"
-        ja3_hash = hashlib.md5(ja3_string.encode()).hexdigest()
-        return f"ja3:{ja3_string}|{ja3_hash}"
+        # Extract JA3 components
+        version = str(client_hello.version)
+        ciphers = "-".join(str(cipher) for cipher in client_hello.ciphers)
+        extensions = "-".join(str(ext.type) for ext in client_hello.ext if ext)
+        elliptic_curves = ""
+        ec_point_formats = ""
+        for ext in client_hello.ext:
+            if ext.type == 10:  # Supported Groups (elliptic curves)
+                elliptic_curves = "-".join(str(g) for g in ext.groups)
+            elif ext.type == 11:  # EC Point Formats
+                ec_point_formats = "-".join(str(f) for f in ext.ecpf)
+        
+        # Build JA3 string
+        ja3_string = f"{version},{ciphers},{extensions},{elliptic_curves},{ec_point_formats}"
+        
+        # Compute JA3 hash
+        ja3_hash = md5(ja3_string.encode()).hexdigest()
+        return f"ja3:{ja3_string} ({ja3_hash})"
     except Exception as e:
-        print(f"[ERROR] JA3 computation failed for {host}:{port}: {e}")
+        logging.error(f"JA3 computation failed for {ip}:{port}: {e}")
         return "ja3:unknown"
 
 async def http_fingerprint(ip: str, port: int, session: aiohttp.ClientSession, use_tls_fingerprint: bool = False) -> Dict:
@@ -215,6 +208,11 @@ async def http_fingerprint(ip: str, port: int, session: aiohttp.ClientSession, u
 
     try:
         if use_tls_fingerprint and port == 443:
+            # Compute JA3 fingerprint using Scapy (run in separate thread to avoid blocking)
+            loop = asyncio.get_event_loop()
+            ja3 = await loop.run_in_executor(None, compute_ja3_fingerprint, ip, port)
+            result["tls_fingerprint"] = ja3
+            
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             context.set_alpn_protocols(["h2", "http/1.1"])
             context.set_ciphers("ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256")
@@ -223,7 +221,6 @@ async def http_fingerprint(ip: str, port: int, session: aiohttp.ClientSession, u
                 result["headers"] = dict(resp.headers)
                 result["final_url"] = str(resp.url)
                 result["http2"] = resp.version == (2, 0)
-                result["tls_fingerprint"] = compute_ja3_fingerprint(ip, port)
                 try:
                     text = await resp.text()
                     start = text.lower().find("<title>")
@@ -255,15 +252,24 @@ async def http_fingerprint(ip: str, port: int, session: aiohttp.ClientSession, u
                         result["cdn_detected"] = cdn
                         break
     except Exception as e:
-        print(f"[ERROR] HTTP check failed for {ip}:{port}: {e}")
+        logging.debug(f"HTTP check failed for {ip}:{port}: {e}")
     return result
 
 def run_nuclei(ip: str, port: int, output_file: str) -> List[Dict]:
     try:
         cmd = [
             "nuclei", "-u", f"http://{ip}:{port}" if port != 443 else f"https://{ip}",
-            "-tہ: red]Nuclei scan failed for {ip}:{port}: {e}[/red]")
-            return []
+            "-t", "cves/", "-t", "technologies/", "-jsonl", "-o", output_file
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        findings = []
+        with open(output_file, "r") as f:
+            for line in f:
+                findings.append(json.loads(line.strip()))
+        return findings
+    except Exception as e:
+        logging.error(f"Nuclei scan failed for {ip}:{port}: {e}")
+        return []
 
 def parse_ports(port_str: str) -> List[int]:
     ports = []
@@ -282,10 +288,10 @@ def parse_ports(port_str: str) -> List[int]:
     return sorted(list(set(ports)))
 
 async def process_batch(subdomains: List[str], resolver: aiodns.DNSResolver, semaphore: asyncio.Semaphore, wildcard_ips: set) -> List[Dict]:
+    tasks = [resolve_dns(sub, resolver, semaphore) for sub in subdomains]
+    resolved = await asyncio.gather(*tasks)
     results = []
-    for i, sub in enumerate(subdomains, 1):
-        print(f"[INFO] Processing subdomain {i}/{len(subdomains)}: {sub}")
-        dns_records = await resolve_dns(sub, resolver, semaphore)
+    for sub, dns_records in zip(subdomains, resolved):
         valid_records = {k: v for k, v in dns_records.items() if v}
         if valid_records:
             for ip in valid_records.get("A", []) + valid_records.get("AAAA", []):
@@ -316,7 +322,7 @@ def save_results(results: List[Dict], json_file: str, csv_file: str):
                 "ip": result["ip"],
                 "asn": result["asn"]["asn"],
                 "org": result["asn"]["org"],
-                "cdn_name": result["cdn"]["name"] or "-",
+                "cdn_name": result["cdn"]["name"],
                 "port": result.get("http", {}).get("port", "-"),
                 "status": result.get("http", {}).get("status", "-"),
                 "server": result.get("http", {}).get("headers", {}).get("Server", "-"),
@@ -328,37 +334,21 @@ def save_results(results: List[Dict], json_file: str, csv_file: str):
                 "nuclei_findings": json.dumps(result.get("nuclei_findings", []))
             })
 
-def display_results(results: List[Dict]):
-    for result in results:
-        print(f"Subdomain: {result['subdomain']}")
-        print(f"IP: {result['ip']}")
-        print(f"ASN: {result['asn']['asn']}")
-        print(f"Org: {result['asn']['org']}")
-        print(f"CDN: {result['cdn']['name'] or '-'}")
-        print(f"Port: {result.get('http', {}).get('port', '-')}")
-        print(f"Status: {result.get('http', {}).get('status', '-')}")
-        print(f"Server: {result.get('http', {}).get('headers', {}).get('Server', '-')}")
-        print(f"Title: {result.get('http', {}).get('title', '-')}")
-        print(f"Final URL: {result.get('http', {}).get('final_url', '-')}")
-        print(f"HTTP/2: {result.get('http', {}).get('http2', False)}")
-        print(f"TLS Fingerprint: {result.get('http', {}).get('tls_fingerprint', '-')}")
-        print(f"CDN Detected: {result.get('http', {}).get('cdn_detected', '-')}")
-        print("-" * 50)
-
 async def main(domain: str, wordlist_path: str, ports: str, use_tls_fingerprint: bool, use_nuclei: bool, securitytrails_api: str = None):
-    print("WARNING: Gunakan skrip ini hanya pada domain yang Anda miliki atau dengan izin eksplisit!")
+    print("⚠️ PERINGATAN: Gunakan skrip ini hanya pada domain yang Anda miliki atau dengan izin eksplisit!")
+    logging.info(f"Starting scan for domain: {domain}")
 
     if not is_valid_domain(domain):
-        print("ERROR: Domain tidak valid")
+        print("Error: Domain tidak valid")
         return
 
     if not Path(wordlist_path).is_file():
-        print(f"ERROR: File wordlist '{wordlist_path}' tidak ditemukan")
+        print(f"Error: File wordlist '{wordlist_path}' tidak ditemukan")
         return
 
     target_ports = parse_ports(ports)
     if not target_ports:
-        print("ERROR: Port tidak valid")
+        print("Error: Port tidak valid")
         return
 
     with open(wordlist_path, "r") as f:
@@ -368,22 +358,25 @@ async def main(domain: str, wordlist_path: str, ports: str, use_tls_fingerprint:
         passive_subdomains = await get_passive_subdomains(domain, securitytrails_api)
         subdomains.extend(passive_subdomains)
         subdomains = list(set(subdomains))
+        logging.info(f"Added {len(passive_subdomains)} passive subdomains from SecurityTrails")
 
     resolver = aiodns.DNSResolver()
     semaphore = asyncio.Semaphore(100)
     has_wildcard, wildcard_ips = await detect_wildcard(domain, resolver)
     if has_wildcard:
-        print(f"WARNING: Wildcard DNS detected for {domain}. IPs: {wildcard_ips}")
+        print(f"Wildcard DNS detected for {domain}. IPs: {wildcard_ips}")
         logging.info(f"Wildcard DNS detected: {wildcard_ips}")
 
+    batch_size = 1000
     all_results = []
-    for i in range(0, len(subdomains), 1000):
-        batch = subdomains[i:i + 1000]
+    for i in range(0, len(subdomains), batch_size):
+        batch = subdomains[i:i + batch_size]
         batch_results = await process_batch(batch, resolver, semaphore, wildcard_ips)
         all_results.extend(batch_results)
+        print(f"Processed {min(i + batch_size, len(subdomains))}/{len(subdomains)} subdomains")
 
     if not all_results:
-        print("ERROR: Tidak ditemukan subdomain valid di luar wildcard/CDN")
+        print("Tidak ditemukan subdomain valid di luar wildcard/CDN")
         logging.info("No valid subdomains found")
         return
 
@@ -399,19 +392,14 @@ async def main(domain: str, wordlist_path: str, ports: str, use_tls_fingerprint:
                         result["nuclei_findings"] = run_nuclei(ip, port, nuclei_output)
                     break
 
-    # Tampilin hasil
-    display_results(all_results)
-
-    # Simpan hasil
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    json_file = f"results_{domain}_{timestamp}.json"
-    csv_file = f"results_{domain}_{timestamp}.csv"
+    json_file = f"results_{domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    csv_file = f"results_{domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     save_results(all_results, json_file, csv_file)
-    print(f"INFO: Results saved to {json_file} and {csv_file}")
+    print(f"Results saved to {json_file} and {csv_file}")
     logging.info(f"Results saved to {json_file} and {csv_file}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Cloudflare Origin IP Bypass - Scapy JA3")
+    parser = argparse.ArgumentParser(description="Supercharged Cloudflare Origin IP Bypass v2 with Scapy JA3")
     parser.add_argument("domain", help="Target domain (e.g., example.com)")
     parser.add_argument("wordlist", help="Path to subdomain wordlist file")
     parser.add_argument("--ports", help="Comma-separated ports or range (e.g., 80,443 or 1-1000)", default="80,443,8080")
@@ -423,5 +411,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main(args.domain, args.wordlist, args.ports, args.tls_fingerprint, args.nuclei, args.securitytrails_api))
     except KeyboardInterrupt:
-        print("\nERROR: Scan dihentikan oleh pengguna")
+        print("\nScan dihentikan oleh pengguna")
         logging.info("Scan interrupted by user")
